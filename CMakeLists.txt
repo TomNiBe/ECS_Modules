@@ -1,101 +1,65 @@
 cmake_minimum_required(VERSION 3.16)
-project(ecs_module LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+project(common_libs LANGUAGES CXX)
 
-# --------------------------------------------------------------------------
-# ECS core library
-# --------------------------------------------------------------------------
+option(COMMON_LIBS_INSTALL "Enable install rules (for packaging)" OFF)
 
-add_library(ecs_core
-    src/ecs_world.hpp
-    src/ecs_world.cpp
-    src/lua_loader.hpp
-    src/lua_loader.cpp
-)
+add_library(common_ecs INTERFACE)
+add_library(common::ecs ALIAS common_ecs)
 
-target_include_directories(ecs_core PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+target_compile_features(common_ecs INTERFACE cxx_std_20)
+target_include_directories(common_ecs INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ecs/include>
     $<INSTALL_INTERFACE:include>
 )
 
-# --------------------------------------------------------------------------
-# Lua detection
-# --------------------------------------------------------------------------
+add_library(common_net INTERFACE)
+add_library(common::net ALIAS common_net)
 
-find_package(Lua QUIET)
+target_compile_features(common_net INTERFACE cxx_std_20)
+target_include_directories(common_net INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/net/include>
+    $<INSTALL_INTERFACE:include>
+)
 
-if (Lua_FOUND AND TARGET Lua::Lua)
-    message(STATUS "Using Lua target: Lua::Lua")
-    target_link_libraries(ecs_core PUBLIC Lua::Lua)
+add_library(common_engine INTERFACE)
+add_library(common::engine ALIAS common_engine)
 
-else()
-    message(STATUS "Lua::Lua NOT found — falling back to manual search")
+target_compile_features(common_engine INTERFACE cxx_std_20)
+target_include_directories(common_engine INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/engine/include>
+    $<INSTALL_INTERFACE:include>
+)
 
-    find_path(LUA_INCLUDE_DIR
-        NAMES lua.h
-        PATHS
-            /usr/include
-            /usr/local/include
-            /usr/include/lua5.3
-            /usr/include/lua5.4
-    )
+target_link_libraries(common_engine INTERFACE common::ecs)
+find_package(Lua 5.3 QUIET)
 
-    find_library(LUA_LIBRARY
-        NAMES lua5.4 lua5.3 lua
-        PATHS
-            /usr/lib
-            /usr/lib64
-            /usr/local/lib
-    )
-
-    if (NOT LUA_INCLUDE_DIR OR NOT LUA_LIBRARY)
-        message(FATAL_ERROR "Lua not found. Install liblua5.3-dev or liblua5.4-dev.")
+if (Lua_FOUND)
+    if (TARGET Lua::Lua)
+        target_link_libraries(common_engine INTERFACE Lua::Lua)
+    else()
+        target_include_directories(common_engine INTERFACE ${LUA_INCLUDE_DIR})
+        target_link_libraries(common_engine INTERFACE ${LUA_LIBRARIES})
     endif()
-
-    message(STATUS "Lua include dir: ${LUA_INCLUDE_DIR}")
-    message(STATUS "Lua library:     ${LUA_LIBRARY}")
-
-    target_include_directories(ecs_core PUBLIC ${LUA_INCLUDE_DIR})
-    target_link_libraries(ecs_core PUBLIC ${LUA_LIBRARY})
+else()
+    message(FATAL_ERROR
+    "Lua 5.3 introuvable. Installe liblua5.3-dev (Debian/Ubuntu) ou lua53 (vcpkg), "
+    "ou rends Lua disponible à CMake via CMAKE_PREFIX_PATH.")
 endif()
 
-# --------------------------------------------------------------------------
-# Ncurses detection (NEW)
-# --------------------------------------------------------------------------
+if (COMMON_LIBS_INSTALL)
+    include(GNUInstallDirs)
 
-find_package(Curses REQUIRED)
+    install(TARGETS common_ecs common_net common_engine
+        EXPORT common_libs_targets
+    )
 
-message(STATUS "Ncurses include: ${CURSES_INCLUDE_DIR}")
-message(STATUS "Ncurses libs:    ${CURSES_LIBRARIES}")
+    install(DIRECTORY ecs/include/    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(DIRECTORY net/include/    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(DIRECTORY engine/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-# --------------------------------------------------------------------------
-# Example executable
-# --------------------------------------------------------------------------
-
-add_executable(ecs_example src/main.cpp)
-
-# Link example → ECS core + ncurses
-target_link_libraries(ecs_example PRIVATE
-    ecs_core
-    ${CURSES_LIBRARIES}
-)
-
-target_include_directories(ecs_example PRIVATE
-    ${CURSES_INCLUDE_DIR}
-)
-
-# --------------------------------------------------------------------------
-# Install rules
-# --------------------------------------------------------------------------
-
-install(TARGETS ecs_core EXPORT ecs_coreTargets
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
-)
-
-install(DIRECTORY src/ DESTINATION include
-    FILES_MATCHING PATTERN "*.hpp"
-)
+    install(EXPORT common_libs_targets
+        NAMESPACE common::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/common_libs
+    )
+endif()

@@ -1,3 +1,6 @@
 {
-    "cmake.sourceDirectory": "/wsl.localhost/Ubuntu/home/tom/Delivery/ecs_module"
+    "cmake.sourceDirectory": "/wsl.localhost/Ubuntu/home/tom/Delivery/ecs_module",
+    "files.associations": {
+        "cassert": "cpp"
+    }
 }
