@@ -1,33 +1,36 @@
-# Bibliothèque `net` – couche réseau UDP
+# `net` library – UDP network layer
 
-La bibliothèque `net` fournit une couche réseau légère et sans blocage pour synchroniser un jeu multi‑joueur.  Elle repose sur les sockets UDP de l’OS, évite toute dépendance externe et utilise des structures C simples pour représenter les paquets.  Son but est de transporter les entrées du client vers le serveur et de renvoyer des instantanés d’état du serveur vers le client à cadence fixe.
+The `net` library provides a lightweight, non‑blocking network layer to synchronise a multi‑player game. It relies on the OS UDP sockets, avoids any external dependency and uses simple C structures to represent packets. Its purpose is to carry client inputs to the server and return state snapshots from the server to the client at a fixed rate.
 
-## Principes de fonctionnement
+## Operating principles
 
-* **UDP et pas de blocage** : la communication utilise le protocole UDP pour minimiser la latence.  Les sockets sont configurés en mode non bloquant (« pas de blocage »).  Les fonctions `pollInputs()` (côté serveur) et `pollSnapshot()` (côté client) doivent être appelées régulièrement pour vider la file de réception.
-* **Cadence fixe** : le serveur envoie les instantanés à une cadence fixe (par exemple 60 fois par seconde).  De même, le client envoie ses entrées à chaque itération de sa boucle.  Il n’y a pas de retransmission automatique ; les données perdues sont compensées par la fréquence d’envoi.
-* **Rôle du serveur** : le serveur écoute sur un port UDP, gère un tableau fixe de « emplacements » (slots) pour les clients, attribue un slot à chaque adresse inconnue et renvoie un instantané de l’état.  Il maintient pour chaque slot les derniers numéros de séquence reçus et traités ainsi qu’un compteur d’instantanés.
-* **Rôle du client** : le client envoie périodiquement ses entrées au serveur et reçoit des instantanés d’état.  Il applique ces instantanés pour mettre à jour sa propre représentation du monde et ajuste ses prédictions.
+* **UDP and non‑blocking**: communication uses the UDP protocol to minimise latency. Sockets are configured in non‑blocking mode. The functions `pollInputs()` (server side) and `pollSnapshot()` (client side) must be called regularly to drain the receive queue.
 
-## Gestion des emplacements (slots)
+* **Fixed cadence**: the server sends snapshots at a fixed cadence (for example 60 times per second). Similarly, the client sends its inputs on every iteration of its loop. There is no automatic retransmission; lost data are compensated by the sending frequency.
 
-La structure interne `ClientSlot` contient :
+* **Role of the server**: the server listens on a UDP port, manages a fixed array of “slots” for clients, assigns a slot to each unknown address and returns a state snapshot. It maintains for each slot the last input sequence numbers received and processed as well as a snapshot counter.
 
-- **`active`** : indique si le slot est utilisé.
-- **`endpoint`** : adresse et port du client associé (type `sockaddr_in`).
-- **`lastReceivedInput`** : plus grand numéro de séquence d’entrée reçu.
-- **`lastProcessedInput`** : plus grand numéro de séquence d’entrée intégré dans la simulation.
-- **`snapshotCounter`** : identifiant monotone des instantanés envoyés à ce client.
+* **Role of the client**: the client periodically sends its inputs to the server and receives state snapshots. It applies these snapshots to update its own representation of the world and adjusts its predictions.
 
-Lorsque le serveur reçoit un paquet d’entrée d’une adresse inconnue, il cherche un slot libre (`active == false`) et l’associe à cette adresse.  Si tous les slots sont occupés (par défaut `MAX_DEFAULT_CLIENTS = 4`), les nouveaux clients sont ignorés.  Les slots ne sont pas libérés automatiquement ; il est possible d’implémenter un délai d’inactivité dans le code appelant si nécessaire.
+## Slot management
 
-## Description des paquets
+The internal structure `ClientSlot` contains:
 
-Le protocole définit plusieurs structures de paquets sérialisées en mémoire.  **Toutes les valeurs numériques sont stockées en ordre d’octets hôte** : il n’y a pas de conversion automatique en réseau.  Si la communication s’effectue entre machines à bouts différents (little endian/big endian), il est nécessaire de convertir manuellement les valeurs.
+- **`active`**: indicates whether the slot is in use.
+- **`endpoint`**: client address and port (`sockaddr_in`).
+- **`lastReceivedInput`**: highest input sequence number received.
+- **`lastProcessedInput`**: highest input sequence number integrated into the simulation.
+- **`snapshotCounter`**: monotonically increasing identifier of snapshots sent to this client.
 
-### Paquet d’entrée (`InputPacket`)
+When the server receives an input packet from an unknown address, it looks for a free slot (`active == false`) and associates it with that address. If all slots are occupied (default `MAX_DEFAULT_CLIENTS = 4`), new clients are ignored. Slots are not freed automatically; it is possible to implement an inactivity timeout in the calling code if necessary.
 
-Le client envoie un `InputPacket` au serveur pour chaque image de jeu.  La structure est la suivante :
+## Packet descriptions
+
+The protocol defines several packet structures serialised in memory. **All numeric values are stored in host byte order**: there is no automatic network conversion. If communication occurs between machines with different endianness (little‑endian/big‑endian), it is necessary to manually convert the values.
+
+### Input packet (`InputPacket`)
+
+The client sends an `InputPacket` to the server for each game frame. The structure is:
 
 ```
 +----------------------+
@@ -44,19 +47,19 @@ Le client envoie un `InputPacket` au serveur pour chaque image de jeu.  La struc
 +----------------------+
 ```
 
-* **`magic`** : doit être égal à `INPUT_MAGIC` (constante `0x49505430u`, soit "IPT0").  Permet de valider le paquet.
-* **`protocolVersion`** : version du protocole (actuellement 1).  Permet de détecter des incohérences lors d’une mise à jour.
-* **`inputSequence`** : numéro de séquence monotone, incrémenté à chaque envoi.  Le serveur renvoie le dernier numéro traité dans l’instantané pour permettre au client d’éliminer les entrées déjà intégrées.
-* **`clientFrame`** : compteur local de trame, optionnel (peut servir à des statistiques ou des prédictions).
-* **`moveX` / `moveY`** : valeurs flottantes comprises entre −1 et 1 représentant les axes de déplacement.
-* **`firePressed` / `fireHeld` / `fireReleased`** : indicateurs (`0` ou `1`) pour les actions de tir selon que le bouton vient d’être pressé, maintenu ou relâché au cours de cette trame.
-* **`padding`** : octet réservé pour l’alignement ou de futurs champs.
+* **`magic`**: must be equal to `INPUT_MAGIC` (constant `0x49505430u`, i.e. "IPT0"). Allows validating the packet.
+* **`protocolVersion`**: protocol version (currently 1). Allows detecting inconsistencies during an update.
+* **`inputSequence`**: monotonically increasing sequence number, incremented on each send. The server returns the last processed number in the snapshot to allow the client to discard inputs already integrated.
+* **`clientFrame`**: local frame counter, optional (can be used for statistics or prediction).
+* **`moveX` / `moveY`**: floating values between −1 and 1 representing movement axes.
+* **`firePressed` / `fireHeld` / `fireReleased`**: indicators (`0` or `1`) for firing actions depending on whether the button was just pressed, held or released during this frame.
+* **`padding`**: reserved byte for alignment or future fields.
 
-Le client doit envoyer ce paquet en flux constant, même si l’état des entrées n’a pas changé, afin de maintenir la connexion active et de permettre au serveur de calculer les mouvements à partir des entrées les plus récentes.
+The client must send this packet in a constant stream, even if the input state has not changed, to keep the connection active and allow the server to compute movements from the most recent inputs.
 
-### En‑tête d’instantané (`SnapshotHeader`)
+### Snapshot header (`SnapshotHeader`)
 
-Le serveur répond par un `SnapshotPacket` qui commence par un `SnapshotHeader` puis une liste de `SnapshotEntity`.  L’en‑tête est :
+The server responds with a `SnapshotPacket` which begins with a `SnapshotHeader` and then a list of `SnapshotEntity`. The header is:
 
 ```
 +----------------------+
@@ -71,21 +74,21 @@ Le serveur répond par un `SnapshotPacket` qui commence par un `SnapshotHeader` 
 +----------------------+
 ```
 
-* **`magic`** : doit valoir `SNAP_MAGIC` (constante `0x534E4150u`, soit "SNAP").
-* **`protocolVersion`** : version du protocole (actuellement 1).
-* **`snapshotId`** : identifiant monotone d’instantané pour ce client.  Permet de détecter les paquets perdus ou retardés.
-* **`serverFrame`** : compteur de trame côté serveur (par exemple nombre de mises à jour effectuées).
-* **`lastProcessedInput`** : plus grand numéro de séquence d’entrée appliqué dans cette trame pour ce client.  Le client peut supprimer de sa file les entrées dont le numéro est inférieur ou égal.
-* **`controlledId`** : identifiant de l’entité contrôlée par ce client, ou `0xffffffff` si aucune entité n’est associée.
-* **`entityCount`** : nombre d’entrées `SnapshotEntity` qui suivent immédiatement l’en‑tête.  Si ce nombre dépasse `MAX_ENTITIES`, le serveur tronque la liste pour rester sous la taille maximale d’un datagramme UDP.
-* **`reserved`** : champ réservé pour de futurs drapeaux.
+* **`magic`**: must equal `SNAP_MAGIC` (constant `0x534E4150u`, i.e. "SNAP").
+* **`protocolVersion`**: protocol version (currently 1).
+* **`snapshotId`**: snapshot identifier that increases monotonically for this client. Allows detecting lost or delayed packets.
+* **`serverFrame`**: server‑side frame counter (for example number of updates performed).
+* **`lastProcessedInput`**: largest input sequence number applied in this frame for this client. The client can remove from its queue the inputs whose number is less than or equal to this value.
+* **`controlledId`**: identifier of the entity controlled by this client, or `0xffffffff` if no entity is associated.
+* **`entityCount`**: number of `SnapshotEntity` entries that immediately follow the header. If this number exceeds `MAX_ENTITIES`, the server truncates the list to remain under the maximum UDP datagram size.
+* **`reserved`**: reserved field for future flags.
 
-### Entité d’instantané (`SnapshotEntity`)
+### Snapshot entity (`SnapshotEntity`)
 
-Chaque entité contenue dans un instantané est sérialisée par un `SnapshotEntity` :
+Each entity contained in a snapshot is serialised by a `SnapshotEntity`:
 
 ```
-+----------------------+  <-- début de chaque entité
++----------------------+  <-- start of each entity
 | id                  |
 | generation          |
 | alive               |
@@ -102,38 +105,42 @@ Chaque entité contenue dans un instantané est sérialisée par un `SnapshotEnt
 | hitHalfWidth        |
 | hitHalfHeight       |
 | padding[3]          |
-+----------------------+  <-- fin de l’entité
++----------------------+  <-- end of the entity
 ```
 
-* **`id`** : identifiant de l’entité dans l’ECS.
-* **`generation`** : numéro de génération (non utilisé ici, toujours zéro).
-* **`alive`** : `1` si l’entité est vivante, `0` sinon.
-* **`hasPosition`** et **`hasVelocity`** : indicateurs permettant de savoir si les champs de position ou de vitesse sont valides.  Les valeurs `x`, `y`, `vx` et `vy` ne doivent être lues que si les indicateurs correspondants sont à `1`.
-* **`hasHealth`** : indique si la valeur de points de vie suit.
-* **`respawnable`** : réplique le composant `Respawnable` pour savoir si l’entité doit réapparaître.
-* **`hasCollision`** : indique si les données de collision sont valides et si l’entité doit être considérée comme collidable.
-* **`hitHalfWidth` / `hitHalfHeight`** : demi‑largeur et demi‑hauteur de la boîte de collision.  Ces valeurs sont présentes uniquement si `hasCollision` vaut `1`.
-* **`padding[3]`** : octets réservés pour aligner la taille de la structure sur un multiple de 4 octets.
+* **`id`**: entity identifier in the ECS.
+* **`generation`**: generation/version number of the entity (unused here, always zero).
+* **`alive`**: `1` if the entity is alive, `0` otherwise.
+* **`hasPosition`** and **`hasVelocity`**: flags indicating whether the position or velocity fields are valid. The values `x`, `y`, `vx` and `vy` should only be read if the corresponding indicators are `1`.
+* **`hasHealth`**: indicates whether the hit points field follows.
+* **`respawnable`**: replicates the `Respawnable` component to know whether the entity should respawn.
+* **`hasCollision`**: indicates whether collision data are valid and whether the entity should be considered collidable.
+* **`hitHalfWidth` / `hitHalfHeight`**: half‑width and half‑height of the collision box. These values are present only if `hasCollision` is `1`.
+* **`padding[3]`**: reserved bytes to align the size of the structure to a multiple of 4 bytes.
 
-### Paquet d’instantané (`SnapshotPacket`)
+### Snapshot packet (`SnapshotPacket`)
 
-Enfin, le `SnapshotPacket` côté client regroupe un `SnapshotHeader` et un tableau dynamique d’`SnapshotEntity`.  La structure est :
+Finally, the client‑side `SnapshotPacket` contains a `SnapshotHeader` and a dynamic array of `SnapshotEntity`. The structure is:
 
-```
+```cpp
 struct SnapshotPacket {
     SnapshotHeader              header;
     std::vector<SnapshotEntity> entities;
 };
 ```
 
-Le client désérialise l’en‑tête, réserve un tableau de `entityCount` éléments, puis lit chaque `SnapshotEntity`.  Les entités non présentes dans la liste doivent être conservées telles quelles ou supprimées selon la logique du jeu.
+The client deserialises the header, reserves an array of `entityCount` elements, then reads each `SnapshotEntity`. Entities not present in the list should be kept as they are or removed according to the game logic.
 
-## Conseils et bonnes pratiques
+## Tips and best practices
 
-* **Ordre d’octets hôte** : comme mentionné, toutes les valeurs sont envoyées telles quelles (endianness hôte).  Si les clients et le serveur ne partagent pas le même ordre d’octets, utilisez `htonl()`, `ntohl()` et leurs variantes pour convertir les entiers.  Les nombres à virgule flottante nécessitent une conversion manuelle.
-* **Taille des paquets** : les datagrammes UDP ont une taille maximale (en pratique ~512 octets est sûr sur Internet).  Le champ `MAX_ENTITIES` (4096 par défaut) limite le nombre d’entités dans un instantané pour éviter de dépasser cette limite.  Adaptez cette constante à votre jeu.
-* **Perte et réordonancement** : UDP ne garantit ni la livraison ni l’ordre des paquets.  Le client doit conserver les entrées envoyées tant que le serveur n’a pas accusé réception via `lastProcessedInput`.  Le serveur utilise `snapshotId` pour détecter les instantanés obsolètes ou en double.
-* **Relecture d’instantanés** : le client peut appliquer directement le dernier instantané reçu (en écrasant son état local), ou interpoler entre plusieurs instantanés pour obtenir un rendu fluide.  Lorsque des paquets sont perdus, l’interpolation permet de masquer les sauts.
-* **Assignation et libération de slots** : pour gérer de nouveaux joueurs, surveillez l’inactivité d’un slot et libérez‑le si aucun paquet n’a été reçu pendant un certain temps.  La bibliothèque ne fournit pas cette logique ; c’est au code du serveur d’implémenter cette politique.
+* **Host byte order**: as mentioned, all values are sent as‑is (host endianness). If clients and server do not share the same endianness, use `htonl()`, `ntohl()` and their variants to convert integers. Floating‑point numbers require manual conversion.
 
-En appliquant ces conseils, vous obtiendrez une communication réseau simple, robuste et déterministe, adaptée aux jeux d’action nécessitant peu de latence.
+* **Packet size**: UDP datagrams have a maximum size (in practice ~512 bytes is safe on the Internet). The `MAX_ENTITIES` field (4096 by default) limits the number of entities in a snapshot to avoid exceeding this limit. Adapt this constant to your game.
+
+* **Loss and reordering**: UDP does not guarantee delivery or ordering of packets. The client must keep the inputs sent as long as the server has not acknowledged them via `lastProcessedInput`. The server uses `snapshotId` to detect obsolete or duplicate snapshots.
+
+* **Snapshot reapplication**: the client may apply directly the last snapshot received (overwriting its local state), or interpolate between several snapshots for smooth rendering. When packets are lost, interpolation helps mask jumps.
+
+* **Slot assignment and release**: to handle new players, monitor slot inactivity and free it if no packet has been received for a certain time. The library does not provide this logic; it is up to the server code to implement such a policy.
+
+By following these guidelines, you will obtain a simple, robust and deterministic network communication suitable for action games requiring low latency.

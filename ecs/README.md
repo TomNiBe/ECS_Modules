@@ -1,37 +1,37 @@
-# Bibliothèque `ecs` – système entité‑composants
+# `ecs` library – entity–component system
 
-Cette bibliothèque implémente un système entité‑composants (ECS) minimaliste et orienté données.  Elle découple complètement la logique (systèmes) des données (composants) et permet d’itérer efficacement sur des entités.  Les entités sont représentées par un simple identifiant numérique stable et les composants sont stockés dans des tableaux contigus, permettant des parcours rapides et prédictibles.
+This library implements a minimalist, data‑oriented entity–component system (ECS). It completely decouples logic (systems) from data (components) and allows efficient iteration over entities. Entities are represented by a simple, stable numeric handle and components are stored in contiguous arrays to permit fast, predictable traversal.
 
-## Principes généraux
+## General principles
 
-### Pourquoi un ECS orienté données ?
+### Why a data‑oriented ECS?
 
-Un ECS permet de séparer clairement les données de la logique.  Les données sont regroupées en **composants** (simples structures agrégées), tandis que la logique est organisée en **systèmes** qui opèrent sur des ensembles d’entités possédant certains composants.  Cette approche :
+An ECS cleanly separates data from logic. Data are grouped into **components** (simple aggregate structures), whereas logic is organised into **systems** that operate on sets of entities possessing certain components. This approach:
 
-- améliore la localité mémoire et donc les performances,
-- facilite la réutilisation et la composition des comportements,
-- rend la simulation déterministe car l’ordre d’exécution des systèmes est explicitement contrôlé.
+- improves memory locality and thus performance,
+- facilitates reuse and composition of behaviour,
+- makes the simulation deterministic because the execution order of systems is explicitly controlled.
 
-### Concepts clés
+### Key concepts
 
-* **Entité (`ecs::entity_t`)** : handle opaque qui encapsule un index entier.  Une entité n’a pas d’état propre, elle sert uniquement de clé pour accéder à ses composants.  Un handle peut être comparé, copié et réutilisé après destruction (via la liste libre).  Il ne contient pas de génération ; il est donc recommandé de vérifier qu’un handle est toujours vivant avant de l’utiliser.
+* **Entity (`ecs::entity_t`)**: an opaque handle that encapsulates an integer index. An entity has no state of its own; it only serves as a key to access its components. A handle can be compared, copied and reused after destruction (via the free list). It does not contain a generation counter; therefore you should check that a handle is still alive before using it.
 
-* **Composant** : structure de données sans logique.  Par exemple, un `Position` avec des champs `x` et `y`.  Chaque type de composant est enregistré une seule fois auprès du registre.  Les composants sont stockés dans un `sparse_array` contigu, un tableau d’`std::optional<Component>` indexé par l’entité.
+* **Component**: a data structure with no logic. For example, a `Position` with fields `x` and `y`. Each component type is registered exactly once with the registry. Components are stored in a `sparse_array` (a contiguous array of `std::optional<Component>`) indexed by the entity.
 
-* **Système** : fonction ou lambda appelée par le registre qui prend en paramètre des références vers les tableaux de composants.  Les systèmes itèrent sur ces tableaux et mettent à jour les composants.  Ils ne doivent pas allouer de mémoire ni modifier la structure des composants pendant l’itération (hormis via les méthodes du registre prévues à cet effet).
+* **System**: a function or lambda registered with the registry that takes references to component arrays as parameters. Systems iterate over these arrays and update the components. They should not allocate memory or modify the component structure during iteration (except through registry methods designed for that purpose).
 
-## Le registre (`ecs::registry`)
+## The registry (`ecs::registry`)
 
-Le `registry` est le cœur de l’ECS : il gère les entités, stocke les composants et exécute les systèmes.
+The `registry` is the core of the ECS: it manages entities, stores components and executes systems.
 
-### Création et destruction d’entités
+### Creation and destruction of entities
 
-* **`spawn_entity()`** : crée une nouvelle entité et renvoie son handle.  Si des emplacements libres sont disponibles, ils sont réutilisés.
-* **`kill_entity(ecs::entity_t)`** : détruit une entité.  Tous ses composants sont effacés et son index est remis dans la liste libre.  Après destruction, tout handle vers cette entité devient invalide.
+* **`spawn_entity()`**: creates a new entity and returns its handle. If free slots are available, they are reused.
+* **`kill_entity(ecs::entity_t)`**: destroys an entity. All its components are cleared and its index is returned to the free list. After destruction, any handle to that entity becomes invalid.
 
-### Enregistrement et accès aux composants
+### Registering and accessing components
 
-Avant d’utiliser un type de composant, il faut l’enregistrer :
+Before using a component type, you must register it:
 
 ```cpp
 ecs::registry reg;
@@ -39,17 +39,17 @@ reg.register_component<Position>();
 reg.register_component<Velocity>();
 ```
 
-L’enregistrement crée un `sparse_array` interne pour ce type.  Pour manipuler les composants :
+Registration creates an internal `sparse_array` for this type. To manipulate components:
 
-* **Ajout** : `reg.emplace_component<Position>(ent, x, y)` construit un composant en place pour l’entité `ent`.
-* **Suppression** : `reg.remove_component<Position>(ent)` supprime le composant de l’entité (via `erase`).
-* **Accès** : les tableaux retournés par `get_components<T>()` sont des références à des `sparse_array<T>`.  On accède à un composant avec `array[ent]` qui retourne un `std::optional<T>`.  Si l’option est vide, l’entité ne possède pas ce composant.
+* **Adding**: `reg.emplace_component<Position>(ent, x, y)` constructs a component in place for entity `ent`.
+* **Removing**: `reg.remove_component<Position>(ent)` removes the component from the entity (via `erase`).
+* **Access**: arrays returned by `get_components<T>()` are references to `sparse_array<T>`. Access a component using `array[ent]` which returns a `std::optional<T>`. If the option is empty, the entity does not have this component.
 
-### Exécution des systèmes
+### Executing systems
 
-Des systèmes sont enregistrés via `add_system<Composant1, Composant2>(lambda)` où `lambda` reçoit une référence vers le registre et des références vers les tableaux de composants correspondants.  Les systèmes sont stockés dans une liste et **s’exécutent dans l’ordre d’enregistrement** lorsque `run_systems()` est appelé.  Cet ordre est fixe et doit être choisi soigneusement pour maintenir le déterminisme.
+Systems are registered via `add_system<Composant1, Composant2>(lambda)` where `lambda` receives a reference to the registry and references to the corresponding component arrays. Systems are stored in a list and **execute in the order of registration** when `run_systems()` is called. This order is fixed and must be chosen carefully to maintain determinism.
 
-Par exemple :
+For example:
 
 ```cpp
 reg.add_system<Position, Velocity>([](ecs::registry &r,
@@ -67,47 +67,47 @@ reg.add_system<Position, Velocity>([](ecs::registry &r,
 });
 ```
 
-### `ecs::entity_t` : identité et bonnes pratiques
+### `ecs::entity_t`: identity and good practices
 
-Le type `entity_t` encapsule un index.  Un handle par défaut est invalide et peut être testé comme un booléen.  Les identités sont stables tant que l’entité est vivante.  Étant donné que les générations ne sont pas gérées par défaut, il est conseillé de :
+The `entity_t` type encapsulates an index. A default handle is invalid and can be tested as a boolean. Identities are stable as long as the entity is alive. As there is no generation count by default, it is recommended to:
 
-- ne pas conserver de handles au‑delà de la durée de vie garantie par la logique du jeu ;
-- vérifier qu’une entité est vivante avant d’accéder à ses composants ;
-- éviter de stocker les indices bruts dans des conteneurs persistants.
+- not keep handles beyond the lifetime guaranteed by the game logic;
+- check that an entity is alive before accessing its components;
+- avoid storing raw indices in persistent containers.
 
-## `sparse_array` : structure de stockage
+## `sparse_array`: storage structure
 
-Chaque type de composant est stocké dans une instance de `sparse_array<T>`.  Cette structure :
+Each component type is stored in an instance of `sparse_array<T>`. This structure:
 
-- est un tableau contigu de `std::optional<T>` indexé par le `entity_t` ;
-- s’agrandit automatiquement lors de l’accès en écriture à un index supérieur ;
-- retourne une option vide lors d’un accès en lecture hors bornes ;
-- ne garantit pas la stabilité des pointeurs lors d’une réallocation ;
-- permet la présence ou l’absence d’un composant sans allocation par entité.
+- is a contiguous array of `std::optional<T>` indexed by `entity_t`;
+- automatically grows when writing to a higher index;
+- returns an empty option when reading out of bounds;
+- does not guarantee pointer stability after a reallocation;
+- permits the presence or absence of a component without per‑entity allocation.
 
-Accéder à un composant absent est peu coûteux : un objet statique vide est renvoyé.  Lorsqu’un composant est ajouté via `emplace_at` ou `insert_at`, l’option est remplie et l’entité est considérée comme possédant ce composant.
+Accessing an absent component is inexpensive: a static empty object is returned. When a component is added via `emplace_at` or `insert_at`, the option is filled and the entity is considered to have this component.
 
-## Ordre d’exécution des systèmes et implications
+## Order of execution of systems and implications
 
-Les systèmes sont exécutés dans l’ordre où ils sont enregistrés.  Cet ordre doit être choisi de manière cohérente avec la logique de jeu (par exemple, déplacer les entités avant de traiter les collisions).  Modifier l’ordre peut changer l’état final et briser le déterminisme.  Évitez d’enregistrer des systèmes à des endroits différents du code selon les circonstances ; centralisez l’enregistrement lors de la création du moteur.
+Systems are executed in the order they are registered. This order must be chosen consistently with the game logic (for example, move entities before processing collisions). Modifying the order can change the final state and break determinism. Avoid registering systems in different parts of the code depending on circumstances; centralise registration during engine creation.
 
-## Déterminisme et bonnes pratiques
+## Determinism and good practices
 
-- **Pas de mémoire dynamique pendant la boucle** : éviter les allocations dans les systèmes pour garantir des temps de mise à jour stables.
-- **Utiliser un pas de temps fixe** : passez un intervalle constant (`dt`) à la simulation pour éviter des divergences entre machines.
-- **Pas de dépendance à l’ordre non défini** : n’utilisez pas des conteneurs comme `unordered_map` pour l’itération logique dans un système (l’ordre peut varier entre plateformes).  Préférez des vecteurs triés ou calculez un ordre déterministe.
-- **Évitez les effets de bord** : les systèmes doivent uniquement lire et écrire les composants concernés.  Modifiez la structure des entités (ajout ou suppression de composants) en dehors des boucles qui itèrent sur ces mêmes composants pour ne pas invalider les indices.
+- **No dynamic memory inside the loop**: avoid allocations in systems to guarantee stable update times.
+- **Use a fixed time step**: pass a constant interval (`dt`) to the simulation to prevent divergence between machines.
+- **No dependence on undefined order**: do not use containers like `unordered_map` for logical iteration in a system (the order may vary between platforms). Prefer sorted vectors or compute a deterministic order.
+- **Avoid side effects**: systems should only read and write the components concerned. Modify the structure of entities (adding or removing components) outside loops that iterate over those same components to avoid invalidating indices.
 
-## Performances et conseils
+## Performance and advice
 
-Pour obtenir de bonnes performances avec ce modèle :
+To achieve good performance with this model:
 
-1. **Minimiser la mémoire dynamique** : enregistrez tous les types de composants au lancement et évitez d’en créer dynamiquement en cours de jeu.  Les `sparse_array` allouent de manière contiguë.
-2. **Parcours contigus** : les systèmes doivent itérer séquentiellement sur les indices pour profiter des caches.  Utilisez les utilitaires de zip fournis (voir `ecs/zipper.hpp`) pour parcourir plusieurs tableaux en parallèle sans branchement.
-3. **Accès prévisible** : regroupez les composants fréquemment utilisés dans un même système afin de limiter les sauts de cache.  Évitez les accès aléatoires dans la boucle interne.
-4. **Pas de blocage** : laissez aux bibliothèques réseau et moteur la gestion des appels potentiellement bloquants.  Le registre n’exécute rien en dehors de vos systèmes.
+1. **Minimise dynamic memory**: register all component types at startup and avoid creating them dynamically during the game. `sparse_array` allocates contiguously.
+2. **Contiguous traversal**: systems should iterate sequentially over indices to benefit from caches. Use the provided zip utilities (see `ecs/zipper.hpp`) to traverse multiple arrays in parallel without branching.
+3. **Predictable access**: group components that are frequently used together in the same system to limit cache jumps. Avoid random access in the inner loop.
+4. **No blocking**: leave network and engine libraries to handle potentially blocking calls. The registry does not execute anything outside your systems.
 
-## Exemple d’utilisation minimal
+## Minimal usage example
 
 ```cpp
 #include "ecs/ecs.hpp"
@@ -117,11 +117,11 @@ struct Velocity { float x = 0.f; float y = 0.f; };
 
 int main() {
     ecs::registry reg;
-    // enregistrement des composants
+    // register components
     reg.register_component<Position>();
     reg.register_component<Velocity>();
 
-    // système de mise à jour des positions
+    // position update system
     reg.add_system<Position, Velocity>([](ecs::registry &,
                                           auto &positions,
                                           auto &velocities) {
@@ -136,16 +136,16 @@ int main() {
         }
     });
 
-    // création d’une entité
+    // create an entity
     ecs::entity_t e = reg.spawn_entity();
     reg.emplace_component<Position>(e, 0.f, 0.f);
     reg.emplace_component<Velocity>(e, 1.f, 0.f);
 
-    // exécution d’une mise à jour
+    // run a single update
     reg.run_systems();
 
     return 0;
 }
 ```
 
-Dans cet exemple, une entité est créée, on lui assigne une position et une vitesse, puis on exécute un système qui additionne la vitesse à la position.  Ce modèle peut être étendu à de nombreux composants et systèmes pour construire des simulations complexes tout en conservant une structure claire et performante.
+In this example, an entity is created, assigned a position and a velocity, then a system runs that adds the velocity to the position. This model can be extended to many components and systems to build complex simulations while maintaining a clear and performant structure.

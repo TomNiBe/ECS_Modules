@@ -1,213 +1,214 @@
-# Bibliothèque `engine` – façade de jeu
+# `engine` library – game façade
 
-Le module `engine` propose une façade de haut niveau construite par‑dessus l’ECS.  Il charge des définitions depuis un script Lua, crée les entités en conséquence et orchestre l’ensemble des systèmes nécessaires (mouvements, tirs, collisions, dégâts, durée de vie, respawn…).  Son but est de fournir une base de jeu générique et déterministe sans imposer de logique spécifique au projet parent.
+The `engine` module offers a high‑level façade built on top of the ECS. It loads definitions from a Lua script, creates the corresponding entities and orchestrates all the required systems (movement, shooting, collisions, damage, lifetime, respawn, etc.). Its purpose is to provide a generic and deterministic game foundation without imposing project‑specific logic.
 
-## Rôle et positionnement
+## Role and positioning
 
-* **Façade au‑dessus de l’ECS** : l’`Engine` encapsule un `ecs::registry` et enregistre tous les types de composants utiles.  Il expose des méthodes simples pour charger la configuration, créer des entités (archétypes) et faire avancer la simulation.
-* **Chargement de configuration Lua** : les constantes de jeu (archétypes, armes, projectiles) sont décrites dans un fichier Lua qui retourne une table.  Le fichier `resources.hpp` définit les structures `GameConfig`, `Archetype`, `WeaponDef` et `ProjectileDef` et fournit une fonction `loadGameConfig()` qui lit le fichier et remplit ces structures.  Aucun paramètre de gameplay n’est codé en dur dans le moteur.
-* **Boucle de simulation déterministe** : l’`Engine` intègre les mouvements, gère les collisions et applique les dégâts avec un pas de temps fixe `dt` fourni par l’utilisateur (serveur ou client).  Les systèmes sont enregistrés une fois lors de la construction et s’exécutent toujours dans le même ordre.
+* **Façade on top of the ECS**: the `Engine` encapsulates an `ecs::registry` and registers all useful component types. It exposes simple methods to load the configuration, create entities (archetypes) and advance the simulation.
 
-## Chargement de configuration Lua (`GameConfig`)
+* **Lua configuration loading**: game constants (archetypes, weapons, projectiles) are described in a Lua file that returns a table. The file `resources.hpp` defines the structures `GameConfig`, `Archetype`, `WeaponDef` and `ProjectileDef` and provides a function `loadGameConfig()` which reads the file and populates these structures. No gameplay parameter is hard‑coded in the engine.
 
-La configuration de jeu est structurée autour de trois types principaux :
+* **Deterministic simulation loop**: the `Engine` integrates movement, handles collisions and applies damage with a fixed time step `dt` provided by the user (server or client). Systems are registered once during construction and always execute in the same order.
 
-### Projets (`ProjectileDef`)
+## Loading Lua configuration (`GameConfig`)
 
-La structure `ProjectileDef` définit le comportement de base d’un projectile :
+The game configuration is structured around three main types:
 
-- **`collision`** : booléen indiquant si le projectile doit détecter des collisions avec le monde ou les entités.
-- **`damage`** : booléen indiquant si le projectile inflige des dégâts.
-- **`width` / `height`** : dimensions du projectile en unités de monde.
+### Projectiles (`ProjectileDef`)
 
-### Armes (`WeaponDef`)
+The `ProjectileDef` structure defines the basic behaviour of a projectile:
 
-Une `WeaponDef` décrit une arme pouvant être équipée par un archétype :
+- **`collision`**: boolean indicating whether the projectile should detect collisions with the world or entities.
+- **`damage`**: boolean indicating whether the projectile inflicts damage.
+- **`width` / `height`**: dimensions of the projectile in world units.
 
-- **`name`** : nom symbolique de l’arme.
-- **`rate`** : cadence de tir en tirs par seconde.
-- **`speed`** : vitesse des projectiles émis.
-- **`lifetime`** : durée de vie des projectiles en secondes.
-- **`damage`** : points de vie retirés par impact.
-- **`projectileName`** : nom d’une définition de projectile.
-- **`pattern`** : motif de déplacement optionnel appliqué aux projectiles (structure `MovementPattern`).
-- **`piercingHits`** : nombre de cibles pouvant être traversées par un projectile avant de disparaître.
-- **`charge`** : spécification de charge facultative avec `maxTime`, une liste de seuils de temps et des niveaux de charge (`damageMul`, `speedMul`, `sizeMul`, `piercingHits`).  Ces paramètres permettent de moduler l’effet du projectile en fonction de la durée d’appui.
+### Weapons (`WeaponDef`)
 
-### Archétypes (`Archetype`)
+A `WeaponDef` describes a weapon that can be equipped by an archetype:
 
-Les archétypes servent de modèles pour la création d’entités.  Chaque `Archetype` comprend :
+- **`name`**: symbolic name of the weapon.
+- **`rate`**: rate of fire in shots per second.
+- **`speed`**: speed of emitted projectiles.
+- **`lifetime`**: lifetime of the projectiles in seconds.
+- **`damage`**: hit points removed per impact.
+- **`projectileName`**: name of a projectile definition.
+- **`pattern`**: optional movement pattern applied to the projectiles (`MovementPattern` structure).
+- **`piercingHits`**: number of targets the projectile can penetrate before disappearing.
+- **`charge`**: optional charge specification with `maxTime`, a list of time thresholds and charge levels (`damageMul`, `speedMul`, `sizeMul`, `piercingHits`). These parameters allow modulating the projectile’s effect according to how long the fire button is held.
 
-- **`name`** : identifiant de l’archétype.
-- **`respawnable`** : booléen indiquant si l’entité doit réapparaître après destruction.
-- **`health`** : points de vie initiaux.
-- **`collision`** : booléen pour activer ou non les collisions.
-- **`hitbox`** (`HitboxDef`) : dimensions et décalage de la boîte de collision.
-- **`speed`** : vitesse de mouvement par défaut.
-- **`lookDirection`** (`Vec2`) : direction dans laquelle l’entité est orientée au départ.
-- **`target`** : liste ou structure décrivant les classes d’ennemis à attaquer.  L’ordre spécifie la priorité ; chaque catégorie peut être associée à un mode de sélection (par ex. « plus proche de la classe »).  Ces informations sont converties en un composant `TargetList`.
-- **`range`** : portée d’attaque en unités.
-- **`weaponName`** : nom de l’arme équipée.
-- **`pattern`** : motif de déplacement optionnel appliqué à l’entité.
-- **`faction`** : identifiant d’équipe ou de camp pour éviter les tirs amis.
-- **`colliderLayer` / `colliderMask` / `colliderSolid` / `colliderTrigger` / `colliderStatic`** : définition du comportement de collision (voir composant `Collider`).
-- **`thornsEnabled`** / **`thornsDamage`** : activer des « épines » infligeant des dégâts aux entités qui entrent en contact.
+### Archetypes (`Archetype`)
 
-### Configuration globale (`GameConfig`)
+Archetypes serve as templates for entity creation. Each `Archetype` includes:
 
-Une instance de `GameConfig` contient trois tableaux associatifs : `projectiles`, `weapons` et `archetypes` clés par leur nom.  La fonction `loadGameConfig(const std::string &path)` lit un fichier Lua et remplit ces tableaux.  En cas d’erreur de format, une exception est levée.  Ces structures persistent durant toute la vie du moteur.
+- **`name`**: identifier of the archetype.
+- **`respawnable`**: boolean indicating whether the entity should reappear after destruction.
+- **`health`**: initial hit points.
+- **`collision`**: boolean to enable or disable collisions.
+- **`hitbox`** (`HitboxDef`): dimensions and offset of the collision box.
+- **`speed`**: default movement speed.
+- **`lookDirection`** (`Vec2`): direction in which the entity is initially oriented.
+- **`target`**: list or structure describing classes of enemies to attack. The order specifies the priority; each category can be associated with a selection mode (for example “closest in class”). These informations are converted into a `TargetList` component.
+- **`range`**: attack range in units.
+- **`weaponName`**: name of the equipped weapon.
+- **`pattern`**: optional movement pattern applied to the entity.
+- **`faction`**: team identifier to avoid friendly fire.
+- **`colliderLayer` / `colliderMask` / `colliderSolid` / `colliderTrigger` / `colliderStatic`**: definition of collision behaviour (see the `Collider` component).
+- **`thornsEnabled`** / **`thornsDamage`**: enable thorns that inflict damage to entities that come into contact.
 
-## Cycle de simulation
+### Global configuration (`GameConfig`)
 
-Le moteur fournit deux méthodes principales :
+An instance of `GameConfig` contains three associative arrays: `projectiles`, `weapons` and `archetypes` keyed by their name. The function `loadGameConfig(const std::string &path)` reads a Lua file and fills these arrays. If the format is incorrect, an exception is thrown. These structures persist throughout the life of the engine.
 
-1. **`spawn(archetypeName, x, y)`** : crée une entité à partir d’un archétype, installe tous les composants et initialise sa position.  Les champs du composant sont construits à partir de la configuration (vitesse, points de vie, boîte de collision, faction, armes, motif de mouvement, épines, etc.).
-2. **`update(dt)`** : exécute un pas de simulation de durée `dt` (en secondes).  Les étapes sont :
-   - Mettre à jour l’horloge interne avec `dt`.
-   - Exécuter tous les systèmes enregistrés via le registre (calcul de la nouvelle `DesiredPosition`, gestion des armes, IA, etc.).
-   - Résoudre les collisions solides et ajuster les positions désirées.
-   - Appliquer les limites jouables pour le joueur (clamp dans la zone autorisée).
-   - Copier les positions désirées dans le composant `Position`.
-   - Éliminer les entités qui sortent des limites du monde.
-   - Gérer les collisions déclencheurs (projectiles, épines), appliquer les dégâts et supprimer les entités mortes.
-   - Réduire les durées de vie (`Lifetime`) et supprimer les entités dont `remaining` est nul ou négatif.
+## Simulation cycle
 
-Toutes ces opérations s’effectuent de manière déterministe, sans allocations dynamiques, et en s’appuyant sur l’ECS.  L’ordre des systèmes est déterminé lors de la construction de l’`Engine`.
+The engine provides two main methods:
 
-## Composants fournis
+1. **`spawn(archetypeName, x, y)`**: creates an entity from an archetype, installs all the components and initialises its position. The component fields are built from the configuration (speed, hit points, collision box, faction, weapons, movement pattern, thorns, etc.).
+2. **`update(dt)`**: performs a simulation step of duration `dt` (in seconds). The steps are:
+   - Update the internal clock with `dt`.
+   - Execute all registered systems via the registry (compute the new `DesiredPosition`, handle weapons, AI, etc.).
+   - Resolve solid collisions and adjust desired positions.
+   - Apply playable limits for the player (clamp within the allowed zone).
+   - Copy desired positions into the `Position` component.
+   - Remove entities that leave the world bounds.
+   - Handle trigger collisions (projectiles, thorns), apply damage and remove dead entities.
+   - Decrease lifetimes (`Lifetime`) and remove entities whose `remaining` is zero or negative.
 
-Le moteur enregistre et utilise de nombreux composants par défaut.  Voici une liste succincte :
+All these operations are deterministic, free of dynamic allocations and rely on the ECS. The order of systems is determined during `Engine` construction.
 
-| Composant | Description |
+## Provided components
+
+The engine registers and uses numerous components by default. Here is a concise list:
+
+| Component | Description |
 |---|---|
-| `Position` | Position en 2D (centre de l’entité). |
-| `Velocity` | Vitesse en 2D (unités par seconde). |
-| `Speed` | Vitesse scalaire de déplacement utilisée avec l’entrée utilisateur. |
-| `LookDirection` | Direction de visée ou d’orientation. |
-| `Health` | Points de vie restants. |
-| `Hitbox` | Demi‑largeur/demi‑hauteur et éventuels décalages pour les collisions solides. |
-| `Collider` | Couche et masque de collision, flags « solide », « déclencheur » ou « statique ». |
-| `Faction` | Identifiant de camp pour gérer les attaques alliées/ennemies. |
-| `PendingDamage` | Dégâts en attente d’application; remis à zéro après chaque mise à jour. |
-| `Piercing` | Nombre de cibles qu’un projectile peut traverser et historique des entités déjà touchées. |
-| `Thorns` | Épines infligeant des dégâts aux entités qui touchent celle‑ci. |
-| `ArchetypeRef` | Pointeur vers la définition d’archétype associée pour accéder aux champs pré‑configurés. |
-| `TargetList` | Liste prioritaire de cibles et modes de sélection par catégorie. |
-| `Range` | Portée d’attaque pour les systèmes IA. |
-| `Respawnable` | Indique si l’entité peut réapparaître après destruction. |
-| `Lifetime` | Durée de vie restante d’un projectile ou d’un bonus. |
-| `Damage` | Dégâts infligés par un projectile (valeur brute). |
-| `MovementPatternComp` | Avancement dans un motif de déplacement (offsets, indice courant). |
-| `InputState` | Entrées du joueur (axes, tir pressé/maintenu). |
-| `WeaponRef` | Pointeur vers la définition d’arme équipée, cadence et charge courante. |
-| `DesiredPosition` | Position calculée par les systèmes avant résolution des collisions. |
+| `Position` | 2D position (centre of the entity). |
+| `Velocity` | 2D velocity (units per second). |
+| `Speed` | Scalar movement speed used with player input. |
+| `LookDirection` | Aiming or facing direction. |
+| `Health` | Remaining hit points. |
+| `Hitbox` | Half‑width/half‑height and optional offsets for solid collisions. |
+| `Collider` | Collision layer and mask; flags for “solid”, “trigger” or “static”. |
+| `Faction` | Team identifier to handle allied/enemy attacks. |
+| `PendingDamage` | Damage pending application; reset to zero after each update. |
+| `Piercing` | Number of targets a projectile can pass through and the history of already hit entities. |
+| `Thorns` | Thorns that deal damage to entities that touch this one. |
+| `ArchetypeRef` | Pointer to the associated archetype definition to access pre‑configured fields. |
+| `TargetList` | Priority list of targets and selection modes per category. |
+| `Range` | Attack range for AI systems. |
+| `Respawnable` | Indicates whether the entity can respawn after destruction. |
+| `Lifetime` | Remaining lifetime of a projectile or bonus. |
+| `Damage` | Damage inflicted by a projectile (raw value). |
+| `MovementPatternComp` | Progression in a movement pattern (offsets, current index). |
+| `InputState` | Player inputs (axes, fire pressed/held/released). |
+| `WeaponRef` | Pointer to the equipped weapon definition, cooldown and current charge. |
+| `DesiredPosition` | Position computed by systems before collision resolution. |
 
-Cette liste n’est pas limitative ; le moteur peut enregistrer des composants supplémentaires selon les besoins de la configuration.
+This list is not exhaustive; the engine may register additional components depending on the configuration.
 
-## Diagramme ASCII
+## ASCII diagram
 
-Le flux d’exécution peut se représenter ainsi :
+The execution flow can be represented as follows:
 
 ```
     +--------------+
-    | Script Lua   |
+    |  Lua script  |
     +------+-------+
            |
            v
     +------+-------+
-    | Chargement   |  (GameConfig)
+    | Configuration|  (GameConfig)
     +------+-------+
            |
            v
     +------+-------+
-    | Moteur       |
-    | (Engine)     |
+    | Engine       |
     +------+-------+
            |
            v
     +------+-------+
-    | Registre ECS |
+    | ECS Registry |
     +------+-------+
            |
            v
     +------+-------+
-    | État du jeu  |
+    | Game state   |
     +------+-------+
            |
            v
     +------+-------+
-    | Réseau       | (envoi d’instantanés)
+    | Network      | (state snapshots)
     +--------------+
 ```
 
-Ce schéma montre comment le script Lua est chargé en une configuration, utilisée par le moteur pour initialiser les entités dans le registre ECS.  La simulation produit un état qui est transmis au module réseau pour synchroniser les clients.
+This diagram shows how the Lua script is loaded into a configuration used by the engine to initialise entities in the ECS registry. The simulation produces a state that is transmitted to the network module to synchronise clients.
 
-## Responsabilités
+## Responsibilities
 
-- **Responsabilités de l’`Engine`** :
-  - Charger la configuration et créer les entités d’après les archétypes.
-  - Enregistrer les composants et les systèmes nécessaires à la simulation.
-  - Gérer les collisions, appliquer les dégâts, supprimer les entités expirées et mettre à jour la position.
-  - Offrir une API minimaliste (`spawn`, `update`, `getRegistry`) au code du jeu.
+- **Engine responsibilities**:
+  - Load the configuration and create entities from archetypes.
+  - Register components and systems required for the simulation.
+  - Handle collisions, apply damage, remove expired entities and update position.
+  - Offer a minimal API (`spawn`, `update`, `getRegistry`) to the game code.
 
-- **Responsabilités du code appelant (jeu, serveur ou client)** :
-  - Appeler `loadGameConfig()` pour charger la configuration Lua au démarrage.
-  - Instancier l’`Engine` avec cette configuration.
-  - Créer les entités initiales (joueur, ennemis, projectiles) via `spawn`.
-  - À chaque tic, récupérer les entrées du joueur ou du réseau, mettre à jour les composants concernés (par ex. `InputState`), puis appeler `update(dt)`.
-  - Sérialiser l’état ou l’appliquer selon qu’on est serveur ou client.
-  - Réagir aux événements du jeu (fin de partie, respawn) en créant ou supprimant des entités.
+- **Calling code responsibilities (game, server or client)**:
+  - Call `loadGameConfig()` to load the Lua configuration at startup.
+  - Instantiate the `Engine` with this configuration.
+  - Create the initial entities (player, enemies, projectiles) via `spawn`.
+  - On each tick, retrieve player or network inputs, update the relevant components (e.g. `InputState`) then call `update(dt)`.
+  - Serialise the state or apply it depending on whether one is the server or the client.
+  - React to game events (end of game, respawn) by creating or deleting entities.
 
-## Exemples d’intégration
+## Integration examples
 
-### Exemple côté serveur
+### Server‑side example
 
 ```cpp
-// Chargement de la configuration et création de l’engine
+// Load configuration and create the engine
 engine::GameConfig cfg = engine::loadGameConfig("config/game.lua");
 engine::Engine eng(cfg);
 
-// Création des entités initiales
+// Create initial entities
 eng.spawn("player", 0.f, 0.f);
 eng.spawn("enemy", 10.f, 0.f);
 
-// Boucle de jeu
-while (tour_en_cours) {
-    // 1. Récupérer les entrées depuis le réseau (InputPacket) et mettre à jour les InputState
+// Game loop
+while (game_running) {
+    // 1. Retrieve inputs from the network (InputPacket) and update InputState
     net::InputPacket input;
-    // ... lecture réseau ...
-    // eng.getRegistry().get_components<engine::InputState>()[entité_joueur]->moveX = input.moveX;
-    // 2. Appeler la simulation avec un pas de temps fixe
+    // ... network read ...
+    // eng.getRegistry().get_components<engine::InputState>()[player_entity]->moveX = input.moveX;
+    // 2. Advance simulation with a fixed time step
     eng.update(1.f / 60.f);
-    // 3. Sérialiser l’état et l’envoyer aux clients via net::SnapshotPacket
-    // ... sérialisation ...
+    // 3. Serialise state and send it to clients via net::SnapshotPacket
+    // ... serialisation ...
 }
 ```
 
-### Exemple côté client
+### Client‑side example
 
 ```cpp
 engine::GameConfig cfg = engine::loadGameConfig("config/game.lua");
 engine::Engine eng(cfg);
 
-// Boucle de rendu
-while (affichage) {
-    // 1. Collecter les entrées clavier/souris et envoyer un InputPacket au serveur
+// Render loop
+while (displaying) {
+    // 1. Collect keyboard/mouse inputs and send an InputPacket to the server
     net::InputPacket pkt;
-    pkt.moveX = lireAxeHorizontal();
-    pkt.moveY = lireAxeVertical();
-    pkt.firePressed = boutonTirJusteAppuyé();
-    pkt.fireHeld    = boutonTirMaintenu();
-    pkt.fireReleased = boutonTirJusteRelâché();
-    // ... envoi réseau ...
-    // 2. Recevoir un SnapshotPacket et appliquer les données aux entités locales
+    pkt.moveX = readHorizontalAxis();
+    pkt.moveY = readVerticalAxis();
+    pkt.firePressed  = fireButtonJustPressed();
+    pkt.fireHeld     = fireButtonHeld();
+    pkt.fireReleased = fireButtonJustReleased();
+    // ... network send ...
+    // 2. Receive a SnapshotPacket and apply the data to local entities
     net::SnapshotPacket snap;
-    // ... lecture réseau ...
-    // mettre à jour la position et l’état des entités contrôlées selon snap
-    // 3. Faire avancer la simulation locale d’une petite quantité pour l’interpolation
+    // ... network read ...
+    // update the position and state of controlled entities according to snap
+    // 3. Advance the local simulation by a small amount for interpolation
     eng.update(1.f / 60.f);
-    // 4. Rendre la scène en se basant sur le registre ECS
+    // 4. Render the scene based on the ECS registry
 }
 ```
 
-Ces exemples illustrent comment le moteur est utilisé conjointement au module réseau pour construire un jeu multi‑joueur déterministe.  Le code reste en français pour les commentaires et la logique de plus haut niveau, tandis que les noms des types et fonctions issus de l’API restent en anglais pour correspondre au code C++.
+These examples illustrate how the engine is used together with the network module to build a deterministic multi‑player game. The comments and high‑level logic remain in French in the original sources, while the names of types and functions from the API remain in English to match the C++ code.

@@ -1,59 +1,68 @@
-# Bibliothèques communes du projet
+# Common Project Libraries
 
-Le dossier `libs/` regroupe les briques fondamentales utilisées pour la simulation, la logique de jeu et la communication réseau.  Chaque sous‑module est conçu pour être autonome et réutilisable.  Ils sont publiés sous forme de sous‑module Git et peuvent être utilisés indépendamment du reste du projet.
+The `libs/` directory groups the fundamental building blocks used for simulation, game logic, and network communication. Each sub‑module is designed to be autonomous and reusable. They are published as Git submodules and can be used independently from the rest of the project.
 
-## Philosophie générale
+## General Philosophy
 
-Ces bibliothèques suivent plusieurs principes :
+These libraries follow several core principles:
 
-1. **Séparation des responsabilités** : chaque sous‑module couvre un domaine précis : `ecs` gère le stockage et l’itération des entités et de leurs composants, `engine` fournit une façade de haut niveau pour charger des définitions depuis Lua et orchestrer les systèmes de simulation, et `net` assure les échanges entre un client et un serveur via UDP.  Aucun module ne dépend du code spécifique au jeu.
-2. **Orientation données** : les structures sont conçues autour des données plutôt que des hiérarchies d’objets.  Les composants sont de simples structures sans logique intégrée et la simulation est réalisée par des fonctions extérieures (systèmes).  Toutes les constantes de jeu proviennent de fichiers de configuration Lua et non du code C++.
-3. **Déterminisme** : pour permettre la reproduction fidèle d’une partie et la synchronisation entre machines, les systèmes s’exécutent dans un ordre déterministe, avec un pas de temps fixe.  Les appels réseau sont non bloquants et les mises à jour sont envoyées à cadence régulière.
-4. **Performance** : les conteneurs internes (notamment dans `ecs`) utilisent des structures de tableaux pour assurer la contiguïté en mémoire et des accès prédictibles.  Les allocations dynamiques sont évitées pendant la simulation et les boucles se déroulent sur des plages contiguës.
+1. **Separation of responsibilities**: each sub‑module covers a clearly defined domain.  
+   - `ecs` handles entity storage and iteration over components,  
+   - `engine` provides a high‑level façade to load Lua‑defined data and orchestrate simulation systems,  
+   - `net` manages communication between a client and a server over UDP.  
+   No module depends on game‑specific code.
 
-## Vue d’ensemble des sous‑modules
+2. **Data‑oriented design**: structures are designed around data rather than object hierarchies. Components are plain data structures with no embedded logic, and simulation is performed by external functions (systems). All gameplay constants come from Lua configuration files rather than C++ code.
 
-- **`ecs/`** : implémente un système entité‑composants minimaliste inspiré des travaux du projet R‑Type.  Il fournit un `registry` pour créer et détruire des entités, enregistrer des types de composants et exécuter des systèmes.  Les composants sont stockés dans des tableaux clairsemés permettant une absence de composant sans allocation.
-- **`engine/`** : constitue une façade de jeu bâtie sur l’ECS.  Ce module charge des définitions de projectile, d’arme et d’archétype depuis un script Lua (`GameConfig`), crée automatiquement les composants nécessaires et exécute la simulation image par image.  Il gère la création (`spawn`), l’intégration (`update`), les collisions, l’application de dégâts, la durée de vie et le respawn des entités.
-- **`net/`** : propose une couche réseau UDP minimale et sans blocage pour synchroniser la simulation entre un client et un serveur.  Les paquets échangés sont de simples structures C sans allocation dynamique : `InputPacket` pour les entrées du client, `SnapshotHeader` et `SnapshotEntity` pour les instantanés d’état envoyés par le serveur.  Le module assigne automatiquement des emplacements aux clients et fournit des callbacks pour traiter les paquets.
+3. **Determinism**: to allow faithful reproduction of a match and synchronization across machines, systems execute in a deterministic order with a fixed time step. Network calls are non‑blocking, and updates are sent at a fixed rate.
 
-## Architecture globale (schéma ASCII)
+4. **Performance**: internal containers (notably in `ecs`) rely on array‑based layouts to ensure memory contiguity and predictable access patterns. Dynamic allocations are avoided during simulation, and hot loops iterate over contiguous ranges.
+
+## Sub‑module Overview
+
+- **`ecs/`**: implements a minimalist entity–component system inspired by the R‑Type project. It provides a `registry` to create and destroy entities, register component types, and execute systems. Components are stored in sparse arrays, allowing the absence of a component without per‑entity allocation.
+
+- **`engine/`**: acts as a game façade built on top of the ECS. This module loads projectile, weapon, and archetype definitions from a Lua script (`GameConfig`), automatically creates the required components, and runs the simulation frame by frame. It manages entity creation (`spawn`), simulation updates (`update`), collisions, damage application, lifetimes, and respawning.
+
+- **`net/`**: provides a minimal, non‑blocking UDP network layer to synchronize the simulation between a client and a server. Exchanged packets are simple C structures with no dynamic allocation: `InputPacket` for client inputs, and `SnapshotHeader` / `SnapshotEntity` for state snapshots sent by the server. The module automatically assigns client slots and exposes callbacks for packet handling.
+
+## Global Architecture (ASCII diagram)
 
 ```
                  +------------------------------+
-                 |  Entrées du joueur          |
+                 |       Player Inputs         |
                  +--------------+---------------+
                                 |
                                 v
                       +---------+---------+
-                      |  Moteur de jeu   |
-                      |  (ECS + Engine)  |
+                      |   Game Engine     |
+                      |   (ECS + Engine)  |
                       +---------+---------+
                                 |
                                 v
                  +--------------+---------------+
-                 |  Instantanés d’état envoyés  |
-                 |  via la couche réseau        |
+                 |   State Snapshots sent via   |
+                 |       the network layer      |
                  +------------------------------+
 ```
 
-Ce schéma résume le flux principal : le module réseau reçoit les entrées du joueur et les transmet au moteur de jeu, lequel met à jour l’état via l’ECS et renvoie des instantanés d’état vers les clients via le réseau.
+This diagram summarizes the main flow: the network module receives player inputs and forwards them to the game engine, which updates the state through the ECS and sends state snapshots back to clients over the network.
 
-## Flux général
+## General Flow
 
-1. Les clients envoient leurs entrées (déplacements, tirs, etc.) au serveur via `InputPacket`.
-2. Le serveur collecte ces entrées et les transmet aux systèmes de simulation (`ecs` et `engine`) en fixant un pas de temps constant.  La logique est entièrement déterministe et orientée données.
-3. Après la mise à jour, le serveur sérialise l’état pertinent dans un `SnapshotPacket` qui contient un `SnapshotHeader` et une liste de `SnapshotEntity`.  Ce paquet est envoyé aux clients à cadence régulière.
-4. Les clients appliquent les instantanés reçus pour mettre à jour leur propre représentation locale de l’état et interpolent/anticipent entre deux instantanés pour un rendu fluide.
+1. Clients send their inputs (movement, firing, etc.) to the server using `InputPacket`.
+2. The server collects these inputs and feeds them into the simulation systems (`ecs` and `engine`) using a fixed time step. The logic is fully deterministic and data‑oriented.
+3. After the update, the server serializes the relevant state into a `SnapshotPacket` containing a `SnapshotHeader` and a list of `SnapshotEntity`. This packet is sent to clients at a fixed rate.
+4. Clients apply received snapshots to update their local world representation and interpolate or predict between snapshots to achieve smooth rendering.
 
 ## Navigation
 
-Vous trouverez ci‑dessous des liens vers la documentation détaillée de chaque sous‑module :
+Below are links to the detailed documentation for each sub‑module:
 
-| Sous‑module | Description | Lien |
+| Sub‑module | Description | Link |
 |---|---|---|
-| `ecs` | Système entité‑composants minimaliste | [Documentation `ecs`](ecs/README.md) |
-| `engine` | Façade de jeu au‑dessus de l’ECS | [Documentation `engine`](engine/README.md) |
-| `net` | Couche réseau UDP non bloquante | [Documentation `net`](net/README.md) |
+| `ecs` | Minimalist entity–component system | [`ecs` documentation](ecs/README.md) |
+| `engine` | Game façade built on top of the ECS | [`engine` documentation](engine/README.md) |
+| `net` | Non‑blocking UDP network layer | [`net` documentation](net/README.md) |
 
-Chaque README est autonome et explique en détail les principes, les types et les conventions nécessaires à l’utilisation du module correspondant.
+Each README is self‑contained and explains in detail the principles, types, and conventions required to use the corresponding module.
