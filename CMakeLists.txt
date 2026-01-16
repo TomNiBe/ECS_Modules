@@ -63,3 +63,18 @@ if (COMMON_LIBS_INSTALL)
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/common_libs
     )
 endif()
+
+# -----------------------------------------------------------------------------
+# Windows-specific configuration for common_net
+#
+# When this module is consumed on Windows (or cross-compiled via MinGW), we
+# expose the Winsock dependency transitively and define a minimum supported
+# Windows version.  These settings align with the r-type top-level build
+# definitions to ensure consistent behaviour across platforms.
+if (WIN32)
+    target_link_libraries(common_net INTERFACE ws2_32)
+    target_compile_definitions(common_net INTERFACE
+        _WIN32_WINNT=0x0601
+        WIN32_LEAN_AND_MEAN
+    )
+endif()
