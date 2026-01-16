@@ -94,10 +94,10 @@ struct InputPacket {
     std::uint16_t _pad0{0};
 
     std::uint32_t inputSequence{0};
+    std::uint32_t clientFrame{0};
 
     float moveX{0.f};
     float moveY{0.f};
-
     std::uint8_t firePressed{0};
     std::uint8_t fireHeld{0};
     std::uint8_t fireReleased{0};
@@ -106,12 +106,26 @@ struct InputPacket {
 
 struct SnapshotEntity {
     std::uint32_t id{0};
+    std::uint16_t generation{0};
+
+    std::uint8_t alive{1};
+    std::uint8_t hasPosition{0};
 
     float x{0.f};
     float y{0.f};
 
+    std::uint8_t hasVelocity{0};
+    std::uint8_t hasHealth{0};
+    std::uint8_t respawnable{0};
+    std::uint8_t hasCollision{0};
+
     float vx{0.f};
     float vy{0.f};
+
+    float health{0.f};
+
+    float hitHalfWidth{0.f};
+    float hitHalfHeight{0.f};
 
     std::uint16_t type{0};
     std::uint16_t flags{0};
@@ -125,11 +139,13 @@ struct SnapshotHeader {
     std::uint32_t snapshotId{0};
     std::uint32_t controlledId{0};
     std::uint32_t lastProcessedInput{0};
+    std::uint32_t serverFrame{0};
 
     std::uint32_t entityCount{0};
 };
 
 #pragma pack(pop)
+
 
 struct SnapshotPacket {
     SnapshotHeader header{};
@@ -147,8 +163,8 @@ struct ClientSlot {
 
 class Server {
 public:
-    using InputCallback = std::function<void(std::size_t, const InputPacket&)>;
-
+    using NewClientCallback = std::function<void(std::size_t, const sockaddr_in&)>;
+    using InputCallback     = std::function<void(std::size_t, const InputPacket&)>;
     explicit Server(std::uint16_t port) {
 #ifdef _WIN32
         static WSAInit _wsa_once{};
@@ -176,8 +192,14 @@ public:
         socket_close(_socket);
         _socket = invalid_socket;
     }
+    void setCallbacks(InputCallback onInput) {
+        _onInput = std::move(onInput);
+    }
 
-    void setCallbacks(InputCallback onInput) { _onInput = std::move(onInput); }
+    void setCallbacks(NewClientCallback onNewClient, InputCallback onInput) {
+        _onNewClient = std::move(onNewClient);
+        _onInput     = std::move(onInput);
+    }
 
     void pollInputs() {
         std::array<char, 1024> buffer{};
@@ -207,38 +229,36 @@ public:
         if (static_cast<std::size_t>(n) < sizeof(InputPacket)) {
             return;
         }
-
         InputPacket pkt{};
         std::memcpy(&pkt, buffer.data(), sizeof(InputPacket));
-
         if (pkt.magic != INPUT_MAGIC || pkt.protocolVersion != PROTOCOL_VERSION) {
             return;
         }
-
         std::size_t idx = findClient(sender);
         if (idx == MAX_DEFAULT_CLIENTS) {
             idx = findFreeSlot();
             if (idx == MAX_DEFAULT_CLIENTS) {
                 return;
             }
-            _clients[idx].active = true;
-            _clients[idx].addr = sender;
+            _clients[idx].active            = true;
+            _clients[idx].addr              = sender;
             _clients[idx].lastReceivedInput = 0;
             _clients[idx].lastProcessedInput = 0;
-            _clients[idx].snapshotCounter = 0;
+            _clients[idx].snapshotCounter    = 0;
+            if (_onNewClient) {
+                _onNewClient(idx, sender);
+            }
         }
-
         _clients[idx].lastReceivedInput = pkt.inputSequence;
-
         if (_onInput) {
             _onInput(idx, pkt);
         }
     }
-
     void sendSnapshot(std::size_t slotIndex,
                       std::uint32_t controlledId,
                       std::uint32_t lastProcessedInput,
-                      const std::vector<SnapshotEntity>& entities) {
+                      const std::vector<SnapshotEntity>& entities,
+                      std::uint32_t serverFrame = 0) {
         if (slotIndex >= MAX_DEFAULT_CLIENTS) return;
         if (!_clients[slotIndex].active) return;
 
@@ -251,6 +271,7 @@ public:
         hdr.snapshotId         = _clients[slotIndex].snapshotCounter++;
         hdr.controlledId       = controlledId;
         hdr.lastProcessedInput = lastProcessedInput;
+        hdr.serverFrame        = serverFrame;
         hdr.entityCount        = count;
 
         const std::size_t totalSize = sizeof(SnapshotHeader) + count * sizeof(SnapshotEntity);
@@ -263,7 +284,6 @@ public:
                         entities.data(),
                         count * sizeof(SnapshotEntity));
         }
-
         ::sendto(_socket,
                  buffer.data(),
                  static_cast<int>(buffer.size()),
@@ -307,9 +327,9 @@ private:
     }
 
 private:
-    socket_handle _socket{invalid_socket};
-    InputCallback _onInput{};
-
+    socket_handle    _socket{invalid_socket};
+    NewClientCallback _onNewClient{};
+    InputCallback     _onInput{};
     std::array<ClientSlot, MAX_DEFAULT_CLIENTS> _clients{};
 };
 
@@ -341,11 +361,10 @@ public:
         socket_close(_socket);
         _socket = invalid_socket;
     }
-
     void sendInput(const InputPacket& pkt) {
         InputPacket tmp = pkt;
-        tmp.magic = INPUT_MAGIC;
-        tmp.protocolVersion = PROTOCOL_VERSION;
+        tmp.magic            = INPUT_MAGIC;
+        tmp.protocolVersion  = PROTOCOL_VERSION;
 
         ::sendto(_socket,
                  reinterpret_cast<const char*>(&tmp),
@@ -354,7 +373,6 @@ public:
                  reinterpret_cast<sockaddr*>(&_server),
                  sizeof(_server));
     }
-
     std::optional<SnapshotPacket> pollSnapshot() {
         constexpr std::size_t maxSize = sizeof(SnapshotHeader) + MAX_ENTITIES * sizeof(SnapshotEntity);
         std::array<char, maxSize> buffer{};
@@ -380,7 +398,6 @@ public:
 #endif
             return std::nullopt;
         }
-
         if (static_cast<std::size_t>(n) < sizeof(SnapshotHeader)) {
             return std::nullopt;
         }
@@ -390,20 +407,16 @@ public:
         if (hdr.magic != SNAP_MAGIC || hdr.protocolVersion != PROTOCOL_VERSION) {
             return std::nullopt;
         }
-
         if (hdr.entityCount > MAX_ENTITIES) {
             return std::nullopt;
         }
-
         const std::size_t expectedSize = sizeof(SnapshotHeader) + hdr.entityCount * sizeof(SnapshotEntity);
         if (static_cast<std::size_t>(n) < expectedSize) {
             return std::nullopt;
         }
-
         SnapshotPacket pkt{};
         pkt.header = hdr;
         pkt.entities.resize(hdr.entityCount);
-
         if (hdr.entityCount > 0) {
             std::memcpy(pkt.entities.data(),
                         buffer.data() + sizeof(SnapshotHeader),
@@ -417,4 +430,4 @@ private:
     sockaddr_in   _server{};
 };
 
-}
+} // namespace net
