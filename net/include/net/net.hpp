@@ -1,86 +1,61 @@
-#pragma once
+#ifndef RTYPE_NET_HPP
+#define RTYPE_NET_HPP
 
+#include <algorithm>
 #include <array>
-#include <atomic>
 #include <cstdint>
-#include <cstring>
+#include <cstring>   // memcpy
 #include <functional>
+#include <iostream>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
-    #ifndef NOMINMAX
-        #define NOMINMAX
-    #endif
-    #ifndef WIN32_LEAN_AND_MEAN
-        #define WIN32_LEAN_AND_MEAN
-    #endif
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #pragma comment(lib, "ws2_32.lib")
+    using socket_handle = SOCKET;
+    using socklen_type  = int;
+    using recv_len      = int;
+    static constexpr socket_handle invalid_socket = INVALID_SOCKET;
+
+    struct WSAInit {
+        WSAInit() {
+            WSADATA wsaData;
+            WSAStartup(MAKEWORD(2, 2), &wsaData);
+        }
+        ~WSAInit() {
+            WSACleanup();
+        }
+    };
 #else
     #include <arpa/inet.h>
     #include <fcntl.h>
     #include <netinet/in.h>
     #include <sys/socket.h>
     #include <unistd.h>
+    using socket_handle = int;
+    using socklen_type  = socklen_t;
+    using recv_len      = ssize_t;
+    static constexpr socket_handle invalid_socket = -1;
 #endif
 
-namespace net {
-
-#ifdef _WIN32
-using socket_handle = SOCKET;
-using socklen_type  = int;
-using recv_len      = int;
-static constexpr socket_handle invalid_socket = INVALID_SOCKET;
-
-struct WSAInit {
-    WSAInit() {
-        WSADATA wsa{};
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-            throw std::runtime_error("WSAStartup failed");
-        }
-    }
-    ~WSAInit() { WSACleanup(); }
-};
-
-inline void socket_close(socket_handle s) {
-    if (s != invalid_socket) {
-        closesocket(s);
-    }
-}
-
+// Helper pour rendre la socket non-bloquante (cross-platform)
 inline void socket_set_nonblocking(socket_handle s) {
+#ifdef _WIN32
     u_long mode = 1;
     ioctlsocket(s, FIONBIO, &mode);
-}
-
 #else
-using socket_handle = int;
-using socklen_type  = socklen_t;
-using recv_len      = ssize_t;
-static constexpr socket_handle invalid_socket = -1;
-
-inline void socket_close(socket_handle s) {
-    if (s != invalid_socket) {
-        ::close(s);
-    }
-}
-
-inline void socket_set_nonblocking(socket_handle s) {
     int flags = fcntl(s, F_GETFL, 0);
     if (flags >= 0) {
         fcntl(s, F_SETFL, flags | O_NONBLOCK);
     }
-}
 #endif
+}
 
 inline constexpr std::size_t MAX_DEFAULT_CLIENTS = 4;
-
 inline constexpr std::uint32_t MAX_ENTITIES = 512;
-
 inline constexpr std::uint16_t PROTOCOL_VERSION = 1;
 
 inline constexpr std::uint32_t INPUT_MAGIC = 0x49505431u;
@@ -136,35 +111,38 @@ struct SnapshotHeader {
     std::uint16_t protocolVersion{PROTOCOL_VERSION};
     std::uint16_t _pad0{0};
 
-    std::uint32_t snapshotId{0};
-    std::uint32_t controlledId{0};
-    std::uint32_t lastProcessedInput{0};
+    std::uint32_t sequence{0};
     std::uint32_t serverFrame{0};
-
+    std::uint32_t controlledId{0};
+    std::uint32_t playerCount{0};
     std::uint32_t entityCount{0};
 };
 
 #pragma pack(pop)
 
-
 struct SnapshotPacket {
-    SnapshotHeader header{};
-    std::vector<SnapshotEntity> entities{};
+    SnapshotHeader header;
+    std::vector<SnapshotEntity> entities;
 };
 
-struct ClientSlot {
-    bool active{false};
-    sockaddr_in addr{};
+namespace net {
 
-    std::uint32_t lastReceivedInput{0};
-    std::uint32_t lastProcessedInput{0};
-    std::uint32_t snapshotCounter{0};
-};
-
+// ======================================================================================
+// SERVER CLASS
+// ======================================================================================
 class Server {
 public:
     using NewClientCallback = std::function<void(std::size_t, const sockaddr_in&)>;
     using InputCallback     = std::function<void(std::size_t, const InputPacket&)>;
+
+    struct ClientSlot {
+        bool active{false};
+        sockaddr_in addr{};
+        std::uint32_t lastReceivedInput{0};
+        std::uint32_t lastProcessedInput{0};
+        std::uint32_t snapshotCounter{0};
+    };
+
     explicit Server(std::uint16_t port) {
 #ifdef _WIN32
         static WSAInit _wsa_once{};
@@ -174,26 +152,26 @@ public:
             throw std::runtime_error("Failed to create server socket");
         }
 
+        socket_set_nonblocking(_socket);
+
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-        if (::bind(_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-            socket_close(_socket);
-            _socket = invalid_socket;
+        if (::bind(_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             throw std::runtime_error("Failed to bind server socket");
         }
-
-        socket_set_nonblocking(_socket);
     }
 
     ~Server() {
-        socket_close(_socket);
-        _socket = invalid_socket;
-    }
-    void setCallbacks(InputCallback onInput) {
-        _onInput = std::move(onInput);
+        if (_socket != invalid_socket) {
+#ifdef _WIN32
+            closesocket(_socket);
+#else
+            close(_socket);
+#endif
+        }
     }
 
     void setCallbacks(NewClientCallback onNewClient, InputCallback onInput) {
@@ -202,98 +180,79 @@ public:
     }
 
     void pollInputs() {
-        std::array<char, 1024> buffer{};
+        while (true) {
+            std::array<char, 1024> buffer{};
+            sockaddr_in sender{};
+            socklen_type senderLen = sizeof(sender);
 
-        sockaddr_in sender{};
-        socklen_type senderLen = sizeof(sender);
+            recv_len n = ::recvfrom(
+                _socket,
+                buffer.data(),
+                static_cast<int>(buffer.size()),
+                0,
+                reinterpret_cast<sockaddr*>(&sender),
+                &senderLen
+            );
 
-        recv_len n = ::recvfrom(
-            _socket,
-            buffer.data(),
-            static_cast<int>(buffer.size()),
-            0,
-            reinterpret_cast<sockaddr*>(&sender),
-            &senderLen
-        );
+            if (n <= 0) {
+                break;
+            }
 
-        if (n <= 0) {
-#ifdef _WIN32
-            const int err = ::WSAGetLastError();
-            if (err == WSAEWOULDBLOCK) return;
-#else
-            return;
-#endif
-            return;
-        }
+            if (static_cast<std::size_t>(n) < sizeof(InputPacket)) {
+                continue; 
+            }
 
-        if (static_cast<std::size_t>(n) < sizeof(InputPacket)) {
-            return;
-        }
-        InputPacket pkt{};
-        std::memcpy(&pkt, buffer.data(), sizeof(InputPacket));
-        if (pkt.magic != INPUT_MAGIC || pkt.protocolVersion != PROTOCOL_VERSION) {
-            return;
-        }
-        std::size_t idx = findClient(sender);
-        if (idx == MAX_DEFAULT_CLIENTS) {
-            idx = findFreeSlot();
+            InputPacket pkt{};
+            std::memcpy(&pkt, buffer.data(), sizeof(InputPacket));
+            
+            if (pkt.magic != INPUT_MAGIC || pkt.protocolVersion != PROTOCOL_VERSION) {
+                continue;
+            }
+
+            std::size_t idx = findClient(sender);
             if (idx == MAX_DEFAULT_CLIENTS) {
-                return;
+                idx = findFreeSlot();
+                if (idx == MAX_DEFAULT_CLIENTS) {
+                    continue;
+                }
+                _clients[idx].active             = true;
+                _clients[idx].addr               = sender;
+                _clients[idx].lastReceivedInput  = 0;
+                _clients[idx].lastProcessedInput = 0;
+                _clients[idx].snapshotCounter    = 0;
+                if (_onNewClient) {
+                    _onNewClient(idx, sender);
+                }
             }
-            _clients[idx].active            = true;
-            _clients[idx].addr              = sender;
-            _clients[idx].lastReceivedInput = 0;
-            _clients[idx].lastProcessedInput = 0;
-            _clients[idx].snapshotCounter    = 0;
-            if (_onNewClient) {
-                _onNewClient(idx, sender);
+            _clients[idx].lastReceivedInput = pkt.inputSequence;
+            if (_onInput) {
+                _onInput(idx, pkt);
             }
-        }
-        _clients[idx].lastReceivedInput = pkt.inputSequence;
-        if (_onInput) {
-            _onInput(idx, pkt);
         }
     }
-    void sendSnapshot(std::size_t slotIndex,
-                      std::uint32_t controlledId,
-                      std::uint32_t lastProcessedInput,
-                      const std::vector<SnapshotEntity>& entities,
-                      std::uint32_t serverFrame = 0) {
-        if (slotIndex >= MAX_DEFAULT_CLIENTS) return;
-        if (!_clients[slotIndex].active) return;
 
-        std::uint32_t count = static_cast<std::uint32_t>(entities.size());
-        if (count > MAX_ENTITIES) count = MAX_ENTITIES;
+    void sendSnapshot(std::size_t slotIndex, const SnapshotHeader& hdr, const std::vector<SnapshotEntity>& ents) {
+        if (slotIndex >= MAX_DEFAULT_CLIENTS || !_clients[slotIndex].active) return;
 
-        SnapshotHeader hdr{};
-        hdr.magic              = SNAP_MAGIC;
-        hdr.protocolVersion    = PROTOCOL_VERSION;
-        hdr.snapshotId         = _clients[slotIndex].snapshotCounter++;
-        hdr.controlledId       = controlledId;
-        hdr.lastProcessedInput = lastProcessedInput;
-        hdr.serverFrame        = serverFrame;
-        hdr.entityCount        = count;
+        SnapshotHeader toSend = hdr;
+        toSend.sequence = _clients[slotIndex].snapshotCounter++;
+        std::vector<char> buffer;
+        buffer.reserve(sizeof(SnapshotHeader) + ents.size() * sizeof(SnapshotEntity));
 
-        const std::size_t totalSize = sizeof(SnapshotHeader) + count * sizeof(SnapshotEntity);
+        const char* hPtr = reinterpret_cast<const char*>(&toSend);
+        buffer.insert(buffer.end(), hPtr, hPtr + sizeof(SnapshotHeader));
 
-        std::vector<char> buffer(totalSize);
-        std::memcpy(buffer.data(), &hdr, sizeof(SnapshotHeader));
-
-        if (count > 0) {
-            std::memcpy(buffer.data() + sizeof(SnapshotHeader),
-                        entities.data(),
-                        count * sizeof(SnapshotEntity));
+        if (!ents.empty()) {
+            const char* ePtr = reinterpret_cast<const char*>(ents.data());
+            buffer.insert(buffer.end(), ePtr, ePtr + ents.size() * sizeof(SnapshotEntity));
         }
-        ::sendto(_socket,
-                 buffer.data(),
-                 static_cast<int>(buffer.size()),
-                 0,
-                 reinterpret_cast<const sockaddr*>(&_clients[slotIndex].addr),
-                 sizeof(sockaddr_in));
+
+        ::sendto(_socket, buffer.data(), static_cast<int>(buffer.size()), 0,
+                 reinterpret_cast<sockaddr*>(&_clients[slotIndex].addr), sizeof(_clients[slotIndex].addr));
     }
 
     void setLastProcessedInput(std::size_t slotIndex, std::uint32_t seq) {
-        if (slotIndex < MAX_DEFAULT_CLIENTS && _clients[slotIndex].active) {
+        if (slotIndex < MAX_DEFAULT_CLIENTS) {
             _clients[slotIndex].lastProcessedInput = seq;
         }
     }
@@ -326,13 +285,15 @@ private:
         return MAX_DEFAULT_CLIENTS;
     }
 
-private:
     socket_handle    _socket{invalid_socket};
     NewClientCallback _onNewClient{};
     InputCallback     _onInput{};
     std::array<ClientSlot, MAX_DEFAULT_CLIENTS> _clients{};
 };
 
+// ======================================================================================
+// CLIENT CLASS
+// ======================================================================================
 class Client {
 public:
     Client(const std::string& host, std::uint16_t port) {
@@ -346,88 +307,91 @@ public:
 
         socket_set_nonblocking(_socket);
 
-        std::memset(&_server, 0, sizeof(_server));
-        _server.sin_family = AF_INET;
-        _server.sin_port   = htons(port);
-
-        if (::inet_pton(AF_INET, host.c_str(), &_server.sin_addr) <= 0) {
-            socket_close(_socket);
-            _socket = invalid_socket;
-            throw std::runtime_error("Invalid server address");
-        }
+        _serverAddr.sin_family = AF_INET;
+        _serverAddr.sin_port   = htons(port);
+        inet_pton(AF_INET, host.c_str(), &_serverAddr.sin_addr);
     }
 
     ~Client() {
-        socket_close(_socket);
-        _socket = invalid_socket;
+        if (_socket != invalid_socket) {
+#ifdef _WIN32
+            closesocket(_socket);
+#else
+            close(_socket);
+#endif
+        }
     }
-    void sendInput(const InputPacket& pkt) {
-        InputPacket tmp = pkt;
-        tmp.magic            = INPUT_MAGIC;
-        tmp.protocolVersion  = PROTOCOL_VERSION;
 
-        ::sendto(_socket,
-                 reinterpret_cast<const char*>(&tmp),
-                 static_cast<int>(sizeof(tmp)),
-                 0,
-                 reinterpret_cast<sockaddr*>(&_server),
-                 sizeof(_server));
+    void sendInput(const InputPacket& pkt) {
+        ::sendto(_socket, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
+                 reinterpret_cast<sockaddr*>(&_serverAddr), sizeof(_serverAddr));
     }
+
     std::optional<SnapshotPacket> pollSnapshot() {
         constexpr std::size_t maxSize = sizeof(SnapshotHeader) + MAX_ENTITIES * sizeof(SnapshotEntity);
         std::array<char, maxSize> buffer{};
+        
+        std::optional<SnapshotPacket> latestSnapshot = std::nullopt;
 
-        sockaddr_in sender{};
-        socklen_type senderLen = sizeof(sender);
+        while (true) {
+            sockaddr_in sender{};
+            socklen_type senderLen = sizeof(sender);
 
-        recv_len n = ::recvfrom(
-            _socket,
-            buffer.data(),
-            static_cast<int>(buffer.size()),
-            0,
-            reinterpret_cast<sockaddr*>(&sender),
-            &senderLen
-        );
+            recv_len n = ::recvfrom(
+                _socket,
+                buffer.data(),
+                static_cast<int>(buffer.size()),
+                0,
+                reinterpret_cast<sockaddr*>(&sender),
+                &senderLen
+            );
 
-        if (n <= 0) {
-#ifdef _WIN32
-            const int err = ::WSAGetLastError();
-            if (err == WSAEWOULDBLOCK) return std::nullopt;
-#else
-            return std::nullopt;
-#endif
-            return std::nullopt;
-        }
-        if (static_cast<std::size_t>(n) < sizeof(SnapshotHeader)) {
-            return std::nullopt;
-        }
+            if (n <= 0) {
+                break;
+            }
 
-        SnapshotHeader hdr{};
-        std::memcpy(&hdr, buffer.data(), sizeof(SnapshotHeader));
-        if (hdr.magic != SNAP_MAGIC || hdr.protocolVersion != PROTOCOL_VERSION) {
-            return std::nullopt;
+            if (sender.sin_addr.s_addr != _serverAddr.sin_addr.s_addr ||
+                sender.sin_port != _serverAddr.sin_port) {
+                continue;
+            }
+
+            if (static_cast<std::size_t>(n) < sizeof(SnapshotHeader)) {
+                continue;
+            }
+
+            SnapshotHeader hdr{};
+            std::memcpy(&hdr, buffer.data(), sizeof(SnapshotHeader));
+
+            if (hdr.magic != SNAP_MAGIC || hdr.protocolVersion != PROTOCOL_VERSION) {
+                continue;
+            }
+            if (hdr.entityCount > MAX_ENTITIES) {
+                continue;
+            }
+
+            const std::size_t expectedSize = sizeof(SnapshotHeader) + hdr.entityCount * sizeof(SnapshotEntity);
+            if (static_cast<std::size_t>(n) < expectedSize) {
+                continue;
+            }
+
+            SnapshotPacket pkt{};
+            pkt.header = hdr;
+            pkt.entities.resize(hdr.entityCount);
+            if (hdr.entityCount > 0) {
+                std::memcpy(pkt.entities.data(),
+                            buffer.data() + sizeof(SnapshotHeader),
+                            hdr.entityCount * sizeof(SnapshotEntity));
+            }
+            latestSnapshot = std::move(pkt);
         }
-        if (hdr.entityCount > MAX_ENTITIES) {
-            return std::nullopt;
-        }
-        const std::size_t expectedSize = sizeof(SnapshotHeader) + hdr.entityCount * sizeof(SnapshotEntity);
-        if (static_cast<std::size_t>(n) < expectedSize) {
-            return std::nullopt;
-        }
-        SnapshotPacket pkt{};
-        pkt.header = hdr;
-        pkt.entities.resize(hdr.entityCount);
-        if (hdr.entityCount > 0) {
-            std::memcpy(pkt.entities.data(),
-                        buffer.data() + sizeof(SnapshotHeader),
-                        hdr.entityCount * sizeof(SnapshotEntity));
-        }
-        return pkt;
+        return latestSnapshot;
     }
 
 private:
     socket_handle _socket{invalid_socket};
-    sockaddr_in   _server{};
+    sockaddr_in   _serverAddr{};
 };
 
 } // namespace net
+
+#endif
