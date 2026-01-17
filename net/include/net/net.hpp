@@ -76,26 +76,13 @@ inline constexpr std::size_t MAX_DEFAULT_CLIENTS = 4;
 inline constexpr std::uint32_t MAX_ENTITIES = 512;
 inline constexpr std::uint16_t PROTOCOL_VERSION = 1;
 
-inline constexpr std::uint32_t MAGIC_JOIN = 0x4A4F494Eu;
-inline constexpr std::uint32_t MAGIC_INPUT = 0x49505431u;
-inline constexpr std::uint32_t MAGIC_SNAP  = 0x534E5031u;
+inline constexpr std::uint32_t INPUT_MAGIC = 0x49505431u;
+inline constexpr std::uint32_t SNAP_MAGIC  = 0x534E5031u;
 
 #pragma pack(push, 1)
 
-struct JoinLobbyPacket {
-    std::uint32_t magic{MAGIC_JOIN};
-    char lobbyCode[8]{0};
-};
-
-struct JoinResponsePacket {
-    std::uint32_t magic{MAGIC_JOIN};
-    std::uint8_t accepted{0};
-    std::uint8_t assignedSlot{0};
-    std::uint16_t _pad{0};
-};
-
 struct InputPacket {
-    std::uint32_t magic{MAGIC_INPUT};
+    std::uint32_t magic{INPUT_MAGIC};
     std::uint16_t protocolVersion{PROTOCOL_VERSION};
     std::uint16_t _pad0{0};
 
@@ -138,7 +125,7 @@ struct SnapshotEntity {
 };
 
 struct SnapshotHeader {
-    std::uint32_t magic{MAGIC_SNAP};
+    std::uint32_t magic{SNAP_MAGIC};
     std::uint16_t protocolVersion{PROTOCOL_VERSION};
     std::uint16_t _pad0{0};
 
@@ -156,13 +143,19 @@ struct SnapshotPacket {
     std::vector<SnapshotEntity> entities;
 };
 
-struct RawPacket {
-    sockaddr_in sender;
-    std::vector<char> data;
-};
-
 class Server {
 public:
+    using NewClientCallback = std::function<void(std::size_t, const sockaddr_in&)>;
+    using InputCallback     = std::function<void(std::size_t, const InputPacket&)>;
+
+    struct ClientSlot {
+        bool active{false};
+        sockaddr_in addr{};
+        std::uint32_t lastReceivedInput{0};
+        std::uint32_t lastProcessedInput{0};
+        std::uint32_t snapshotCounter{0};
+    };
+
     explicit Server(std::uint16_t port) {
 #ifdef _WIN32
         static WSAInit _wsa_once{};
@@ -180,7 +173,6 @@ public:
         addr.sin_port = htons(port);
 
         if (::bind(_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            socket_close(_socket);
             throw std::runtime_error("Failed to bind server socket");
         }
     }
@@ -189,18 +181,21 @@ public:
         socket_close(_socket);
     }
 
-    std::vector<RawPacket> receiveAll() {
-        std::vector<RawPacket> packets;
+    void setCallbacks(NewClientCallback onNewClient, InputCallback onInput) {
+        _onNewClient = std::move(onNewClient);
+        _onInput     = std::move(onInput);
+    }
+
+    void pollInputs() {
         while (true) {
-            RawPacket pkt;
-            pkt.data.resize(2048);
+            std::array<char, 1024> buffer{};
             sockaddr_in sender{};
             socklen_type senderLen = sizeof(sender);
 
             recv_len n = ::recvfrom(
                 _socket,
-                pkt.data.data(),
-                static_cast<int>(pkt.data.size()),
+                buffer.data(),
+                static_cast<int>(buffer.size()),
                 0,
                 reinterpret_cast<sockaddr*>(&sender),
                 &senderLen
@@ -208,24 +203,96 @@ public:
 
             if (n <= 0) break;
 
-            pkt.data.resize(n);
-            pkt.sender = sender;
-            packets.push_back(std::move(pkt));
+            if (static_cast<std::size_t>(n) < sizeof(InputPacket)) continue;
+
+            InputPacket pkt{};
+            std::memcpy(&pkt, buffer.data(), sizeof(InputPacket));
+            
+            if (pkt.magic != INPUT_MAGIC || pkt.protocolVersion != PROTOCOL_VERSION) continue;
+
+            std::size_t idx = findClient(sender);
+            if (idx == MAX_DEFAULT_CLIENTS) {
+                idx = findFreeSlot();
+                if (idx == MAX_DEFAULT_CLIENTS) continue;
+                
+                _clients[idx].active = true;
+                _clients[idx].addr = sender;
+                _clients[idx].lastReceivedInput = 0;
+                _clients[idx].lastProcessedInput = 0;
+                _clients[idx].snapshotCounter = 0;
+                if (_onNewClient) _onNewClient(idx, sender);
+            }
+            
+            _clients[idx].lastReceivedInput = pkt.inputSequence;
+            if (_onInput) _onInput(idx, pkt);
         }
-        return packets;
     }
 
-    void sendTo(const sockaddr_in& target, const void* data, std::size_t size) {
-        ::sendto(_socket,
-                 static_cast<const char*>(data),
-                 static_cast<int>(size),
-                 0,
-                 reinterpret_cast<const sockaddr*>(&target),
-                 sizeof(target));
+    void sendSnapshot(std::size_t slotIndex, std::uint32_t packedFrameData, std::uint32_t controlledId, const std::vector<SnapshotEntity>& ents) {
+        if (slotIndex >= MAX_DEFAULT_CLIENTS || !_clients[slotIndex].active) return;
+
+        SnapshotHeader hdr{};
+        hdr.magic = SNAP_MAGIC;
+        hdr.protocolVersion = PROTOCOL_VERSION;
+        hdr.serverFrame = packedFrameData; 
+        hdr.controlledId = controlledId;
+        hdr.entityCount = static_cast<std::uint32_t>(ents.size());
+
+        sendInternal(slotIndex, hdr, ents);
+    }
+
+    void setLastProcessedInput(std::size_t slotIndex, std::uint32_t seq) {
+        if (slotIndex < MAX_DEFAULT_CLIENTS) _clients[slotIndex].lastProcessedInput = seq;
+    }
+
+    std::uint32_t getLastProcessedInput(std::size_t slotIndex) const {
+        if (slotIndex < MAX_DEFAULT_CLIENTS && _clients[slotIndex].active) {
+            return _clients[slotIndex].lastProcessedInput;
+        }
+        return 0;
     }
 
 private:
-    socket_handle _socket{invalid_socket};
+    void sendInternal(std::size_t slotIndex, SnapshotHeader hdr, const std::vector<SnapshotEntity>& ents) {
+        hdr.sequence = _clients[slotIndex].snapshotCounter++;
+
+        std::vector<char> buffer;
+        buffer.reserve(sizeof(SnapshotHeader) + ents.size() * sizeof(SnapshotEntity));
+
+        const char* hPtr = reinterpret_cast<const char*>(&hdr);
+        buffer.insert(buffer.end(), hPtr, hPtr + sizeof(SnapshotHeader));
+
+        if (!ents.empty()) {
+            const char* ePtr = reinterpret_cast<const char*>(ents.data());
+            buffer.insert(buffer.end(), ePtr, ePtr + ents.size() * sizeof(SnapshotEntity));
+        }
+
+        ::sendto(_socket, buffer.data(), static_cast<int>(buffer.size()), 0,
+                 reinterpret_cast<sockaddr*>(&_clients[slotIndex].addr), sizeof(_clients[slotIndex].addr));
+    }
+
+    std::size_t findClient(const sockaddr_in& addr) const {
+        for (std::size_t i = 0; i < MAX_DEFAULT_CLIENTS; ++i) {
+            if (_clients[i].active &&
+                _clients[i].addr.sin_addr.s_addr == addr.sin_addr.s_addr &&
+                _clients[i].addr.sin_port == addr.sin_port) {
+                return i;
+            }
+        }
+        return MAX_DEFAULT_CLIENTS;
+    }
+
+    std::size_t findFreeSlot() const {
+        for (std::size_t i = 0; i < MAX_DEFAULT_CLIENTS; ++i) {
+            if (!_clients[i].active) return i;
+        }
+        return MAX_DEFAULT_CLIENTS;
+    }
+
+    socket_handle    _socket{invalid_socket};
+    NewClientCallback _onNewClient{};
+    InputCallback     _onInput{};
+    std::array<ClientSlot, MAX_DEFAULT_CLIENTS> _clients{};
 };
 
 class Client {
@@ -248,20 +315,15 @@ public:
         socket_close(_socket);
     }
 
-    void sendJoin(const std::string& lobbyCode) {
-        JoinLobbyPacket pkt{};
-        std::strncpy(pkt.lobbyCode, lobbyCode.c_str(), 7);
-        sendRaw(&pkt, sizeof(pkt));
-    }
-
     void sendInput(const InputPacket& pkt) {
-        sendRaw(&pkt, sizeof(pkt));
+        ::sendto(_socket, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
+                 reinterpret_cast<sockaddr*>(&_serverAddr), sizeof(_serverAddr));
     }
 
     std::optional<SnapshotPacket> pollSnapshot() {
-        constexpr std::size_t bufSize = sizeof(SnapshotHeader) + MAX_ENTITIES * sizeof(SnapshotEntity) + 128;
-        std::array<char, bufSize> buffer{};
-
+        constexpr std::size_t maxSize = sizeof(SnapshotHeader) + MAX_ENTITIES * sizeof(SnapshotEntity);
+        std::array<char, maxSize> buffer{};
+        
         std::optional<SnapshotPacket> latestSnapshot = std::nullopt;
 
         while (true) {
@@ -287,8 +349,7 @@ public:
             SnapshotHeader hdr{};
             std::memcpy(&hdr, buffer.data(), sizeof(SnapshotHeader));
 
-            if (hdr.magic != MAGIC_SNAP) continue;
-            if (hdr.protocolVersion != PROTOCOL_VERSION) continue;
+            if (hdr.magic != SNAP_MAGIC || hdr.protocolVersion != PROTOCOL_VERSION) continue;
             if (hdr.entityCount > MAX_ENTITIES) continue;
 
             const std::size_t expectedSize = sizeof(SnapshotHeader) + hdr.entityCount * sizeof(SnapshotEntity);
@@ -309,34 +370,9 @@ public:
         return latestSnapshot;
     }
 
-    std::optional<JoinResponsePacket> pollJoinResponse() {
-        JoinResponsePacket resp{};
-        std::array<char, 128> buffer{};
-        sockaddr_in sender{};
-        socklen_type slen = sizeof(sender);
-
-        recv_len n = ::recvfrom(_socket, buffer.data(), (int)buffer.size(), 0, (sockaddr*)&sender, &slen);
-        if (n > 0) {
-            if (n >= sizeof(JoinResponsePacket)) {
-                 std::memcpy(&resp, buffer.data(), sizeof(resp));
-                 if (resp.magic == MAGIC_JOIN) return resp;
-            }
-        }
-        return std::nullopt;
-    }
-
 private:
-    void sendRaw(const void* data, std::size_t size) {
-        ::sendto(_socket,
-                 static_cast<const char*>(data),
-                 static_cast<int>(size),
-                 0,
-                 reinterpret_cast<sockaddr*>(&_serverAddr),
-                 sizeof(_serverAddr));
-    }
-
     socket_handle _socket{invalid_socket};
     sockaddr_in   _serverAddr{};
 };
 
-}
+} // namespace net
